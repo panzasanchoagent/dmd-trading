@@ -43,13 +43,20 @@ async def root():
     }
 
 
-# Router imports (uncomment as implemented)
-# from routers import trades, portfolio, journal, principles, coach
-# app.include_router(trades.router, prefix="/api/trades", tags=["trades"])
-# app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
-# app.include_router(journal.router, prefix="/api/journal", tags=["journal"])
-# app.include_router(principles.router, prefix="/api/principles", tags=["principles"])
-# app.include_router(coach.router, prefix="/api/coach", tags=["coach"])
+# Router imports
+from routers import (
+    trades_router,
+    portfolio_router,
+    journal_router,
+    principles_router,
+    coach_router
+)
+
+app.include_router(trades_router, prefix="/api/trades", tags=["trades"])
+app.include_router(portfolio_router, prefix="/api/portfolio", tags=["portfolio"])
+app.include_router(journal_router, prefix="/api/journal", tags=["journal"])
+app.include_router(principles_router, prefix="/api/principles", tags=["principles"])
+app.include_router(coach_router, prefix="/api/coach", tags=["coach"])
 
 
 if __name__ == "__main__":
