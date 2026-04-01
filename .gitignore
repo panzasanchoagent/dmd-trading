@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+venv/
+.venv/
+
+# Environment
+.env
+.env.*
+.env.local
+
+# Build
+.next/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Python
+__pycache__/
+*.py[cod]
