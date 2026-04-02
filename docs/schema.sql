@@ -1,227 +1,210 @@
--- Trading Journal Personal Database Schema
--- Supabase (PostgreSQL)
+-- ============================================================================
+-- TRIGGER - Personal Database Schema
+-- ============================================================================
+-- Run this in your Personal Supabase project (not Arete!)
+-- ============================================================================
 
--- ============================================
--- TRADES
--- Core trade log - manual entry, minimal friction
--- ============================================
-CREATE TABLE trades (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+-- Enable UUID extension if not already enabled
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- ============================================================================
+-- CORE PORTFOLIO TABLES
+-- ============================================================================
+
+-- Starting Positions (Portfolio Snapshot)
+-- This is your baseline - trades are applied on top of this
+CREATE TABLE IF NOT EXISTS starting_positions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     
-    -- Trade details
-    asset VARCHAR(20) NOT NULL,               -- BTC, ETH, SOL, etc.
-    side VARCHAR(10) NOT NULL,                -- BUY, SELL
+    -- Position info
+    asset VARCHAR(20) NOT NULL,
     quantity DECIMAL(20, 8) NOT NULL,
-    price DECIMAL(20, 8) NOT NULL,
-    quote_currency VARCHAR(10) DEFAULT 'USD',
+    avg_entry_price DECIMAL(20, 8),
+    snapshot_date DATE NOT NULL,
     
-    -- Timing
-    executed_at TIMESTAMPTZ NOT NULL,
+    -- Computed
+    cost_basis_usd DECIMAL(20, 2) GENERATED ALWAYS AS (quantity * avg_entry_price) STORED,
     
-    -- Classification
-    trade_type VARCHAR(20),                   -- entry, add, trim, exit, stop_loss
-    strategy VARCHAR(50),                     -- thesis_driven, momentum, scalp, mean_reversion
-    timeframe VARCHAR(20),                    -- day_trade, swing, position
+    -- Metadata
+    notes TEXT,
     
-    -- Context links (to Arete DB - just store IDs for reference)
-    thesis_id UUID,                           -- Link to Arete theses table
-    note_ids UUID[],                          -- Links to Arete notes
-    
-    -- Execution quality
-    planned_entry DECIMAL(20, 8),             -- What price you wanted
-    slippage_pct DECIMAL(10, 4),              -- Calculated: (actual - planned) / planned * 100
-    
-    -- Risk management
-    stop_loss DECIMAL(20, 8),
-    take_profit DECIMAL(20, 8),
-    position_size_pct DECIMAL(10, 4),         -- % of portfolio
-    
-    -- Notes
-    entry_rationale TEXT,                     -- Quick note on why
-    tags VARCHAR(50)[],
-    
-    -- Computed (updated by triggers/jobs)
-    cash_flow DECIMAL(20, 8) GENERATED ALWAYS AS (
-        CASE WHEN side = 'BUY' THEN -quantity * price 
-             ELSE quantity * price END
-    ) STORED
+    UNIQUE(asset, snapshot_date)
 );
 
-CREATE INDEX idx_trades_asset ON trades(asset);
-CREATE INDEX idx_trades_executed_at ON trades(executed_at DESC);
-CREATE INDEX idx_trades_strategy ON trades(strategy);
+CREATE INDEX IF NOT EXISTS idx_starting_positions_asset ON starting_positions(asset);
+CREATE INDEX IF NOT EXISTS idx_starting_positions_date ON starting_positions(snapshot_date);
 
--- ============================================
--- POSITIONS
--- Computed from trades - current holdings
--- ============================================
-CREATE TABLE positions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+-- ============================================================================
+-- TRADES
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS trades (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    
+    -- Core trade data
+    asset VARCHAR(20) NOT NULL,
+    side VARCHAR(10) NOT NULL CHECK (side IN ('BUY', 'SELL')),
+    quantity DECIMAL(20, 8) NOT NULL CHECK (quantity > 0),
+    price DECIMAL(20, 8) NOT NULL CHECK (price > 0),
+    quote_currency VARCHAR(10) DEFAULT 'USD',
+    executed_at TIMESTAMPTZ NOT NULL,
+    
+    -- Cash flow (negative for buys, positive for sells)
+    cash_flow DECIMAL(20, 2) GENERATED ALWAYS AS (
+        CASE 
+            WHEN side = 'BUY' THEN -(quantity * price)
+            WHEN side = 'SELL' THEN (quantity * price)
+        END
+    ) STORED,
+    
+    -- Trade metadata
+    trade_type VARCHAR(20) CHECK (trade_type IN ('entry', 'add', 'trim', 'exit', 'stop_loss', 'rebalance')),
+    strategy VARCHAR(50),
+    timeframe VARCHAR(20) CHECK (timeframe IN ('day_trade', 'swing', 'position', 'core')),
+    
+    -- Risk management
+    planned_entry DECIMAL(20, 8),
+    stop_loss DECIMAL(20, 8),
+    take_profit DECIMAL(20, 8),
+    position_size_pct DECIMAL(5, 2),
+    
+    -- Context
+    entry_rationale TEXT,
+    thesis_id UUID,
+    
+    -- Source tracking (for CSV imports)
+    source VARCHAR(50) DEFAULT 'manual',
+    source_trade_id VARCHAR(100),
+    
+    -- Fees
+    commission DECIMAL(20, 8) DEFAULT 0,
+    fees DECIMAL(20, 8) DEFAULT 0,
+    
+    -- Tags
+    tags TEXT[]
+);
+
+CREATE INDEX IF NOT EXISTS idx_trades_asset ON trades(asset);
+CREATE INDEX IF NOT EXISTS idx_trades_executed_at ON trades(executed_at);
+CREATE INDEX IF NOT EXISTS idx_trades_source ON trades(source);
+
+-- ============================================================================
+-- ASSET MAPPING
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS asset_mapping (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     
     asset VARCHAR(20) NOT NULL UNIQUE,
-    quantity DECIMAL(20, 8) NOT NULL,
-    avg_entry_price DECIMAL(20, 8),
-    total_cost_basis DECIMAL(20, 8),
-    first_entry_date TIMESTAMPTZ,
-    last_trade_date TIMESTAMPTZ,
-    number_of_trades INT,
+    asset_class VARCHAR(50) NOT NULL CHECK (asset_class IN ('Crypto', 'Stocks', 'Commodities', 'Cash')),
+    sector VARCHAR(50) NOT NULL CHECK (sector IN (
+        'DeFi', 
+        'Decentralised AI', 
+        'Crypto Majors', 
+        'Crypto Equities',
+        'AI Equities', 
+        'Financials',
+        'Energy', 
+        'Precious Metals',
+        'Commodity Miners',
+        'Stablecoin',
+        'USD'
+    )),
     
-    -- Live data (updated by job)
-    current_price DECIMAL(20, 8),
-    current_value DECIMAL(20, 8),
-    unrealized_pnl DECIMAL(20, 8),
-    unrealized_pnl_pct DECIMAL(10, 4),
+    -- Optional metadata
+    full_name VARCHAR(200),
+    description TEXT,
+    coingecko_id VARCHAR(100),
+    yahoo_ticker VARCHAR(20),
     
-    -- Classification
-    position_type VARCHAR(20),                -- core, trading, speculative
-    target_allocation_pct DECIMAL(10, 4)
+    is_active BOOLEAN DEFAULT TRUE
 );
 
-CREATE INDEX idx_positions_asset ON positions(asset);
-
--- ============================================
--- CLOSED POSITIONS
--- Historical closed trades with P&L
--- ============================================
-CREATE TABLE closed_positions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    
-    asset VARCHAR(20) NOT NULL,
-    
-    -- Entry
-    entry_date TIMESTAMPTZ,
-    avg_entry_price DECIMAL(20, 8),
-    total_bought DECIMAL(20, 8),
-    entry_cost_basis DECIMAL(20, 8),
-    
-    -- Exit
-    exit_date TIMESTAMPTZ,
-    avg_exit_price DECIMAL(20, 8),
-    total_sold DECIMAL(20, 8),
-    exit_proceeds DECIMAL(20, 8),
-    
-    -- P&L
-    realized_pnl DECIMAL(20, 8),
-    realized_pnl_pct DECIMAL(10, 4),
-    
-    -- Stats
-    holding_period_days INT,
-    number_of_trades INT,
-    
-    -- Classification
-    strategy VARCHAR(50),
-    win_loss VARCHAR(10)                      -- win, loss, breakeven
-);
-
-CREATE INDEX idx_closed_positions_exit_date ON closed_positions(exit_date DESC);
-CREATE INDEX idx_closed_positions_strategy ON closed_positions(strategy);
-
--- ============================================
+-- ============================================================================
 -- JOURNAL ENTRIES
--- Daily trading reflections
--- ============================================
-CREATE TABLE journal_entries (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS journal_entries (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     
-    entry_date DATE NOT NULL UNIQUE,          -- One per day
+    entry_date DATE NOT NULL UNIQUE,
     
     -- Pre-market
-    market_outlook TEXT,                      -- What do I expect today?
-    planned_actions TEXT,                     -- What will I do?
-    risk_appetite VARCHAR(20),                -- aggressive, normal, defensive
+    market_outlook TEXT,
+    planned_actions TEXT,
+    risk_appetite VARCHAR(20) CHECK (risk_appetite IN ('aggressive', 'normal', 'defensive')),
     
     -- End of day
-    what_happened TEXT,                       -- What actually happened
+    what_happened TEXT,
     what_went_well TEXT,
     what_went_poorly TEXT,
     lessons_learned TEXT,
     
     -- Emotional state
-    emotional_state VARCHAR(20),              -- calm, anxious, greedy, fearful, neutral
+    emotional_state TEXT,
     energy_level INT CHECK (energy_level BETWEEN 1 AND 5),
     focus_level INT CHECK (focus_level BETWEEN 1 AND 5),
     
     -- Links
-    trade_ids UUID[],                         -- Trades made today
-    principle_violations UUID[]               -- Rules I broke
+    trade_ids UUID[],
+    principle_violations UUID[]
 );
 
-CREATE INDEX idx_journal_entries_date ON journal_entries(entry_date DESC);
+CREATE INDEX IF NOT EXISTS idx_journal_entries_date ON journal_entries(entry_date);
 
--- ============================================
+-- ============================================================================
 -- PRINCIPLES
--- Trading rules and beliefs
--- ============================================
-CREATE TABLE principles (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS principles (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     
     title VARCHAR(200) NOT NULL,
     description TEXT NOT NULL,
-    category VARCHAR(50),                     -- risk, entry, exit, sizing, psychology
+    category VARCHAR(50) CHECK (category IN ('risk', 'entry', 'exit', 'sizing', 'psychology')),
+    rule_type VARCHAR(20) DEFAULT 'soft' CHECK (rule_type IN ('hard', 'soft')),
     
-    -- Rule specifics
-    rule_type VARCHAR(20),                    -- hard (never break), soft (guideline)
+    -- Quantifiable rules
     quantifiable BOOLEAN DEFAULT FALSE,
-    metric VARCHAR(100),                      -- e.g., "max_position_size_pct"
-    threshold DECIMAL(20, 8),                 -- e.g., 5.0 (for 5%)
+    metric VARCHAR(100),
+    threshold DECIMAL(20, 8),
     
     -- Tracking
+    priority INT DEFAULT 5 CHECK (priority BETWEEN 1 AND 10),
     times_followed INT DEFAULT 0,
     times_violated INT DEFAULT 0,
     last_violated_at TIMESTAMPTZ,
     
-    -- Status
-    active BOOLEAN DEFAULT TRUE,
-    priority INT DEFAULT 5                    -- 1-10, higher = more important
-);
-
-CREATE INDEX idx_principles_category ON principles(category);
-CREATE INDEX idx_principles_active ON principles(active);
-
--- ============================================
--- CHECKLISTS
--- Pre-trade verification
--- ============================================
-CREATE TABLE checklists (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    
-    name VARCHAR(100) NOT NULL,
-    description TEXT,
-    checklist_type VARCHAR(30),               -- pre_trade, position_review, exit
-    
-    -- Items stored as JSONB for flexibility
-    items JSONB NOT NULL,                     -- [{text, required, category}]
-    
     active BOOLEAN DEFAULT TRUE
 );
 
--- ============================================
+-- ============================================================================
 -- POST MORTEMS
--- Detailed trade analysis
--- ============================================
-CREATE TABLE post_mortems (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS post_mortems (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     created_at TIMESTAMPTZ DEFAULT NOW(),
     
-    -- Link to trade(s)
-    trade_ids UUID[] NOT NULL,                -- Can cover multiple related trades
+    trade_ids UUID[] NOT NULL,
     asset VARCHAR(20) NOT NULL,
     
-    -- Outcome
-    result VARCHAR(20),                       -- win, loss, breakeven
-    pnl DECIMAL(20, 8),
+    -- Results
+    result VARCHAR(20) CHECK (result IN ('win', 'loss', 'breakeven')),
+    pnl DECIMAL(20, 2),
     pnl_pct DECIMAL(10, 4),
     
-    -- Analysis
+    -- Scores (1-5)
     entry_quality INT CHECK (entry_quality BETWEEN 1 AND 5),
     exit_quality INT CHECK (exit_quality BETWEEN 1 AND 5),
     sizing_quality INT CHECK (sizing_quality BETWEEN 1 AND 5),
@@ -233,145 +216,201 @@ CREATE TABLE post_mortems (
     would_do_differently TEXT,
     key_lesson TEXT,
     
-    -- Pattern identification
-    emotional_factors VARCHAR(50)[],          -- fomo, fear, greed, patience, impatience
-    execution_errors VARCHAR(50)[],           -- early_entry, late_exit, oversized, undersized
-    
-    -- Links to principles
+    -- Patterns
+    emotional_factors TEXT[],
+    execution_errors TEXT[],
     principles_followed UUID[],
     principles_violated UUID[],
     
-    -- AI coach feedback
+    -- AI feedback
     ai_feedback TEXT,
     ai_generated_at TIMESTAMPTZ
 );
 
-CREATE INDEX idx_post_mortems_asset ON post_mortems(asset);
-CREATE INDEX idx_post_mortems_result ON post_mortems(result);
+-- ============================================================================
+-- COACH SESSIONS
+-- ============================================================================
 
--- ============================================
--- PATTERNS
--- Recurring behaviors identified by AI
--- ============================================
-CREATE TABLE patterns (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW(),
-    
-    name VARCHAR(200) NOT NULL,
-    description TEXT NOT NULL,
-    pattern_type VARCHAR(30),                 -- strength, weakness, neutral
-    category VARCHAR(50),                     -- timing, sizing, emotion, entry, exit
-    
-    -- Evidence
-    supporting_trade_ids UUID[],
-    occurrence_count INT DEFAULT 1,
-    first_identified_at TIMESTAMPTZ,
-    last_occurred_at TIMESTAMPTZ,
-    
-    -- Impact
-    estimated_pnl_impact DECIMAL(20, 8),      -- How much this pattern costs/earns
-    severity VARCHAR(20),                     -- critical, high, medium, low
-    
-    -- Status
-    acknowledged BOOLEAN DEFAULT FALSE,
-    being_addressed BOOLEAN DEFAULT FALSE,
-    resolved BOOLEAN DEFAULT FALSE,
-    
-    -- AI metadata
-    ai_identified BOOLEAN DEFAULT TRUE,
-    confidence_score DECIMAL(5, 4)            -- 0-1
-);
-
-CREATE INDEX idx_patterns_type ON patterns(pattern_type);
-CREATE INDEX idx_patterns_category ON patterns(category);
-
--- ============================================
--- EXECUTION COACH SESSIONS
--- AI coaching conversation history
--- ============================================
-CREATE TABLE coach_sessions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+CREATE TABLE IF NOT EXISTS coach_sessions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     created_at TIMESTAMPTZ DEFAULT NOW(),
     
-    session_type VARCHAR(30),                 -- pre_trade, post_trade, weekly_review, ad_hoc
-    
-    -- Context
+    session_type VARCHAR(50) CHECK (session_type IN ('pre_trade', 'post_trade', 'weekly_review', 'ad_hoc')),
     trade_ids UUID[],
-    position_snapshot JSONB,                  -- Portfolio state at session time
     
-    -- Conversation
-    messages JSONB NOT NULL,                  -- [{role, content, timestamp}]
+    -- Conversation stored as JSONB array
+    messages JSONB DEFAULT '[]'::jsonb,
     
-    -- Outcomes
+    -- Summary
     key_insights TEXT[],
     action_items TEXT[],
-    principles_reinforced UUID[],
     
-    -- Metadata
+    -- Model info
     model_used VARCHAR(100),
     tokens_used INT
 );
 
-CREATE INDEX idx_coach_sessions_type ON coach_sessions(session_type);
-CREATE INDEX idx_coach_sessions_created ON coach_sessions(created_at DESC);
+-- ============================================================================
+-- PATTERNS (Detected trading patterns)
+-- ============================================================================
 
--- ============================================
--- FUNCTIONS
--- ============================================
+CREATE TABLE IF NOT EXISTS patterns (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    
+    pattern_type VARCHAR(50) NOT NULL,    -- 'positive', 'negative', 'neutral'
+    pattern_name VARCHAR(200) NOT NULL,
+    description TEXT,
+    
+    -- Evidence
+    trade_ids UUID[],
+    occurrence_count INT DEFAULT 1,
+    first_detected_at TIMESTAMPTZ DEFAULT NOW(),
+    last_detected_at TIMESTAMPTZ DEFAULT NOW(),
+    
+    -- Impact
+    avg_pnl_when_present DECIMAL(10, 2),
+    win_rate_when_present DECIMAL(5, 2),
+    
+    -- AI analysis
+    ai_recommendation TEXT,
+    ai_analyzed_at TIMESTAMPTZ,
+    
+    active BOOLEAN DEFAULT TRUE
+);
 
--- Update updated_at timestamp
-CREATE OR REPLACE FUNCTION update_updated_at()
-RETURNS TRIGGER AS $$
+-- ============================================================================
+-- ROW LEVEL SECURITY (Optional but recommended)
+-- ============================================================================
+
+-- Enable RLS on all tables
+ALTER TABLE starting_positions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trades ENABLE ROW LEVEL SECURITY;
+ALTER TABLE asset_mapping ENABLE ROW LEVEL SECURITY;
+ALTER TABLE journal_entries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE principles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE post_mortems ENABLE ROW LEVEL SECURITY;
+ALTER TABLE coach_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE patterns ENABLE ROW LEVEL SECURITY;
+
+-- Create policies for anon access (adjust based on your needs)
+-- For a personal DB, you might want to allow full access to authenticated users
+
+CREATE POLICY "Allow all operations" ON starting_positions FOR ALL USING (true);
+CREATE POLICY "Allow all operations" ON trades FOR ALL USING (true);
+CREATE POLICY "Allow all operations" ON asset_mapping FOR ALL USING (true);
+CREATE POLICY "Allow all operations" ON journal_entries FOR ALL USING (true);
+CREATE POLICY "Allow all operations" ON principles FOR ALL USING (true);
+CREATE POLICY "Allow all operations" ON post_mortems FOR ALL USING (true);
+CREATE POLICY "Allow all operations" ON coach_sessions FOR ALL USING (true);
+CREATE POLICY "Allow all operations" ON patterns FOR ALL USING (true);
+
+-- ============================================================================
+-- HELPER FUNCTIONS
+-- ============================================================================
+
+-- Function to calculate current positions
+CREATE OR REPLACE FUNCTION get_current_positions()
+RETURNS TABLE (
+    asset VARCHAR(20),
+    quantity DECIMAL(20, 8),
+    avg_entry_price DECIMAL(20, 8),
+    cost_basis DECIMAL(20, 2),
+    trade_count BIGINT
+) AS $$
 BEGIN
-    NEW.updated_at = NOW();
-    RETURN NEW;
+    RETURN QUERY
+    WITH starting AS (
+        SELECT 
+            sp.asset,
+            sp.quantity as start_qty,
+            sp.avg_entry_price as start_price,
+            sp.cost_basis_usd as start_cost
+        FROM starting_positions sp
+        WHERE sp.snapshot_date = (SELECT MAX(snapshot_date) FROM starting_positions)
+    ),
+    trade_totals AS (
+        SELECT 
+            t.asset,
+            SUM(CASE WHEN t.side = 'BUY' THEN t.quantity ELSE -t.quantity END) as net_qty,
+            SUM(CASE WHEN t.side = 'BUY' THEN t.quantity * t.price ELSE 0 END) as buy_cost,
+            SUM(CASE WHEN t.side = 'BUY' THEN t.quantity ELSE 0 END) as buy_qty,
+            COUNT(*) as num_trades
+        FROM trades t
+        GROUP BY t.asset
+    )
+    SELECT 
+        COALESCE(s.asset, tt.asset) as asset,
+        COALESCE(s.start_qty, 0) + COALESCE(tt.net_qty, 0) as quantity,
+        CASE 
+            WHEN (COALESCE(s.start_qty, 0) + COALESCE(tt.buy_qty, 0)) > 0 
+            THEN (COALESCE(s.start_cost, 0) + COALESCE(tt.buy_cost, 0)) / 
+                 (COALESCE(s.start_qty, 0) + COALESCE(tt.buy_qty, 0))
+            ELSE 0
+        END as avg_entry_price,
+        COALESCE(s.start_cost, 0) + COALESCE(tt.buy_cost, 0) as cost_basis,
+        COALESCE(tt.num_trades, 0) as trade_count
+    FROM starting s
+    FULL OUTER JOIN trade_totals tt ON s.asset = tt.asset
+    WHERE (COALESCE(s.start_qty, 0) + COALESCE(tt.net_qty, 0)) > 0;
 END;
 $$ LANGUAGE plpgsql;
 
--- Apply to relevant tables
-CREATE TRIGGER update_trades_updated_at
-    BEFORE UPDATE ON trades
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+-- ============================================================================
+-- SAMPLE DATA (Comment out in production)
+-- ============================================================================
 
-CREATE TRIGGER update_positions_updated_at
-    BEFORE UPDATE ON positions
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+-- Uncomment below to insert sample asset mappings
+/*
+INSERT INTO asset_mapping (asset, asset_class, sector, full_name) VALUES
+-- Crypto Majors
+('BTC', 'Crypto', 'Crypto Majors', 'Bitcoin'),
+('ETH', 'Crypto', 'Crypto Majors', 'Ethereum'),
+('SOL', 'Crypto', 'Crypto Majors', 'Solana'),
 
-CREATE TRIGGER update_journal_entries_updated_at
-    BEFORE UPDATE ON journal_entries
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+-- DeFi
+('AAVE', 'Crypto', 'DeFi', 'Aave'),
+('UNI', 'Crypto', 'DeFi', 'Uniswap'),
+('MKR', 'Crypto', 'DeFi', 'Maker'),
+('CRV', 'Crypto', 'DeFi', 'Curve'),
+('HYPE', 'Crypto', 'DeFi', 'Hyperliquid'),
 
-CREATE TRIGGER update_principles_updated_at
-    BEFORE UPDATE ON principles
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+-- Decentralised AI
+('TAO', 'Crypto', 'Decentralised AI', 'Bittensor'),
+('RNDR', 'Crypto', 'Decentralised AI', 'Render'),
+('FET', 'Crypto', 'Decentralised AI', 'Fetch.ai'),
 
-CREATE TRIGGER update_patterns_updated_at
-    BEFORE UPDATE ON patterns
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+-- Stablecoins
+('USDC', 'Crypto', 'Stablecoin', 'USD Coin'),
+('USDT', 'Crypto', 'Stablecoin', 'Tether'),
 
--- ============================================
--- RLS POLICIES
--- Single user, but good practice
--- ============================================
-ALTER TABLE trades ENABLE ROW LEVEL SECURITY;
-ALTER TABLE positions ENABLE ROW LEVEL SECURITY;
-ALTER TABLE closed_positions ENABLE ROW LEVEL SECURITY;
-ALTER TABLE journal_entries ENABLE ROW LEVEL SECURITY;
-ALTER TABLE principles ENABLE ROW LEVEL SECURITY;
-ALTER TABLE checklists ENABLE ROW LEVEL SECURITY;
-ALTER TABLE post_mortems ENABLE ROW LEVEL SECURITY;
-ALTER TABLE patterns ENABLE ROW LEVEL SECURITY;
-ALTER TABLE coach_sessions ENABLE ROW LEVEL SECURITY;
+-- AI Equities
+('NVDA', 'Stocks', 'AI Equities', 'NVIDIA'),
+('AMD', 'Stocks', 'AI Equities', 'Advanced Micro Devices'),
+('MSFT', 'Stocks', 'AI Equities', 'Microsoft'),
+('GOOG', 'Stocks', 'AI Equities', 'Alphabet'),
 
--- For now, allow all authenticated (anon key) access
--- Can tighten later if needed
-CREATE POLICY "Allow all" ON trades FOR ALL USING (true);
-CREATE POLICY "Allow all" ON positions FOR ALL USING (true);
-CREATE POLICY "Allow all" ON closed_positions FOR ALL USING (true);
-CREATE POLICY "Allow all" ON journal_entries FOR ALL USING (true);
-CREATE POLICY "Allow all" ON principles FOR ALL USING (true);
-CREATE POLICY "Allow all" ON checklists FOR ALL USING (true);
-CREATE POLICY "Allow all" ON post_mortems FOR ALL USING (true);
-CREATE POLICY "Allow all" ON patterns FOR ALL USING (true);
-CREATE POLICY "Allow all" ON coach_sessions FOR ALL USING (true);
+-- Crypto Equities
+('MSTR', 'Stocks', 'Crypto Equities', 'MicroStrategy'),
+('COIN', 'Stocks', 'Crypto Equities', 'Coinbase'),
+('MARA', 'Stocks', 'Crypto Equities', 'Marathon Digital'),
+
+-- Financials
+('JPM', 'Stocks', 'Financials', 'JPMorgan Chase'),
+('GS', 'Stocks', 'Financials', 'Goldman Sachs'),
+
+-- Precious Metals
+('GLD', 'Commodities', 'Precious Metals', 'SPDR Gold Trust'),
+('SLV', 'Commodities', 'Precious Metals', 'iShares Silver Trust'),
+
+-- Energy
+('USO', 'Commodities', 'Energy', 'United States Oil Fund'),
+('BNO', 'Commodities', 'Energy', 'Brent Oil Fund'),
+('UNG', 'Commodities', 'Energy', 'United States Natural Gas Fund'),
+
+-- Cash
+('USD', 'Cash', 'USD', 'US Dollar'),
+('Cash', 'Cash', 'USD', 'Cash')
+
+ON CONFLICT (asset) DO NOTHING;
+*/
