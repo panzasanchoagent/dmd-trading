@@ -28,12 +28,12 @@ export default function Dashboard() {
   }, []);
 
   if (loading) {
-    return <div className="animate-pulse">Loading...</div>;
+    return <div className="animate-pulse text-khaki-600">Loading...</div>;
   }
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
+      <h1 className="text-2xl font-bold text-khaki-900">Dashboard</h1>
 
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -65,25 +65,25 @@ export default function Dashboard() {
       </div>
 
       {/* Quick Actions */}
-      <div className="bg-white rounded-lg border border-gray-200 p-6">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">Quick Actions</h2>
+      <div className="card p-6">
+        <h2 className="text-lg font-semibold text-khaki-900 mb-4">Quick Actions</h2>
         <div className="flex gap-4">
-          <button className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors">
+          <button className="btn-primary">
             + New Trade
           </button>
-          <button className="px-4 py-2 bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200 transition-colors">
+          <button className="btn-secondary">
             📝 Journal Entry
           </button>
-          <button className="px-4 py-2 bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200 transition-colors">
+          <button className="btn-secondary">
             🤖 Talk to Coach
           </button>
         </div>
       </div>
 
       {/* Recent Activity */}
-      <div className="bg-white rounded-lg border border-gray-200 p-6">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">Recent Activity</h2>
-        <p className="text-gray-500">No recent activity. Start by logging a trade!</p>
+      <div className="card p-6">
+        <h2 className="text-lg font-semibold text-khaki-900 mb-4">Recent Activity</h2>
+        <p className="text-khaki-500">No recent activity. Start by logging a trade!</p>
       </div>
     </div>
   );
@@ -103,18 +103,18 @@ function SummaryCard({
   icon: string;
 }) {
   return (
-    <div className="bg-white rounded-lg border border-gray-200 p-4">
+    <div className="card-hover p-4">
       <div className="flex items-center justify-between">
         <span className="text-2xl">{icon}</span>
         {positive !== undefined && (
-          <span className={positive ? 'text-green-500' : 'text-red-500'}>
+          <span className={positive ? 'text-success' : 'text-danger'}>
             {positive ? '↑' : '↓'}
           </span>
         )}
       </div>
-      <p className="mt-2 text-sm text-gray-500">{title}</p>
-      <p className="text-xl font-semibold text-gray-900">{value}</p>
-      {subtitle && <p className="text-sm text-gray-400">{subtitle}</p>}
+      <p className="mt-2 text-sm text-khaki-500">{title}</p>
+      <p className="text-xl font-semibold text-khaki-900">{value}</p>
+      {subtitle && <p className="text-sm text-khaki-400">{subtitle}</p>}
     </div>
   );
 }

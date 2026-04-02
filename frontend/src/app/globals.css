@@ -3,9 +3,21 @@
 @tailwind utilities;
 
 :root {
-  --foreground-rgb: 0, 0, 0;
-  --background-start-rgb: 250, 250, 250;
-  --background-end-rgb: 255, 255, 255;
+  /* Khaki Green Theme */
+  --khaki-50: #F4F6EF;
+  --khaki-100: #E5E9DA;
+  --khaki-200: #CCD4B8;
+  --khaki-300: #A8B494;
+  --khaki-400: #8F9E7A;
+  --khaki-500: #78866B;
+  --khaki-600: #6B7B3B;
+  --khaki-700: #5A6438;
+  --khaki-800: #4A5230;
+  --khaki-900: #3D4423;
+  
+  --foreground-rgb: 45, 55, 35;
+  --background-start-rgb: 250, 251, 247;
+  --background-end-rgb: 244, 246, 239;
 }
 
 body {
@@ -18,7 +30,7 @@ body {
     rgb(var(--background-start-rgb));
 }
 
-/* Custom scrollbar */
+/* Custom scrollbar - khaki themed */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -29,10 +41,40 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
+  background: #A8B494;
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8;
+  background: #78866B;
+}
+
+/* Selection color */
+::selection {
+  background: #CCD4B8;
+  color: #3D4423;
+}
+
+/* Focus ring */
+*:focus-visible {
+  outline: 2px solid #6B7B3B;
+  outline-offset: 2px;
+}
+
+/* Button base styles */
+.btn-primary {
+  @apply bg-khaki-600 hover:bg-khaki-700 text-white font-medium py-2 px-4 rounded-lg transition-colors;
+}
+
+.btn-secondary {
+  @apply bg-khaki-100 hover:bg-khaki-200 text-khaki-800 font-medium py-2 px-4 rounded-lg transition-colors;
+}
+
+/* Card styles */
+.card {
+  @apply bg-white border border-khaki-200 rounded-xl shadow-sm;
+}
+
+.card-hover {
+  @apply card hover:border-khaki-400 hover:shadow-md transition-all;
 }

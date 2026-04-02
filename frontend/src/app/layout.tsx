@@ -6,7 +6,7 @@ import Sidebar from '@/components/layout/Sidebar';
 const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
-  title: 'Trading Journal',
+  title: 'Trigger - Trading Journal',
   description: 'Personal trading execution system with AI coaching',
 };
 
@@ -18,9 +18,9 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={inter.className}>
-        <div className="flex h-screen bg-gray-50">
+        <div className="flex h-screen bg-surface">
           <Sidebar />
-          <main className="flex-1 overflow-auto">
+          <main className="flex-1 overflow-auto bg-gradient-to-br from-khaki-50/50 to-white">
             <div className="p-6">
               {children}
             </div>
