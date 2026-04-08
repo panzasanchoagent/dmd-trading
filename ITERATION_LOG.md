@@ -68,3 +68,36 @@
 
 ### Time Spent
 - ~35 minutes
+
+---
+
+## Loop 3 — Live dashboard valuation + proxy hardening
+
+### Changes Made
+- Traced the reported `~$125k` valuation back to the frontend home dashboard, which was still using hardcoded mock summary data.
+- Rewired the dashboard homepage to fetch `/api/portfolio/summary` and `/api/portfolio/nav-history` instead of rendering placeholders.
+- Hardened the Next.js rewrite config to prefer server-side `API_URL`, default to `127.0.0.1:8001`, and normalize stale Tailscale `100.x.x.x:8001` proxy targets back to localhost.
+- Updated the frontend env example to document the new server-side API config.
+
+### Test Results
+- Backend summary endpoint on live local server: ✅ (`/api/portfolio/summary` returns `total_value: 91594.93`)
+- Portfolio reconstruction still resolves 3 open positions and 13 closed cycles from personal DB: ✅
+- Backend regression test (`venv/bin/python -m unittest test_portfolio_fallbacks.py`): ✅
+- Frontend build verification: ⚠️ blocked because `next` is not installed locally (`node_modules` missing in this checkout)
+
+### Bugs Found
+1. Home dashboard valuation was pure mock data (`125000`) and never touched the backend.
+2. Frontend proxy rewrite could keep honoring a stale `NEXT_PUBLIC_API_URL=http://100.114.8.13:8001`, sending requests to an unreachable Tailscale address even when backend was running locally.
+
+### Fixes Applied
+- Replaced dashboard mock state with real API-backed summary loading.
+- Added graceful fallback when NAV history is unavailable so the dashboard summary still loads.
+- Switched rewrite resolution to `API_URL` first and guard-railed stale Tailscale self-addresses to `127.0.0.1:8001`.
+
+### Verification
+- Local backend endpoint now reports the real portfolio total of ~$91.6k, matching reconstructed holdings (`USD`, `WEAT`, `CANE`).
+- The hardcoded `$125k` path has been removed from the dashboard page.
+- Proxy destination now resolves to localhost by default for the colocated frontend/backend setup.
+
+### Time Spent
+- ~20 minutes
