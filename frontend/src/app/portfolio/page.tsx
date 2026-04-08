@@ -1,72 +1,120 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 interface Position {
-  id: string;
   asset: string;
   quantity: number;
-  avgEntryPrice: number;
-  currentPrice: number;
-  unrealizedPnL: number;
-  unrealizedPnLPct: number;
-  positionType: string;
+  avg_entry_price: number | null;
+  current_price: number | null;
+  current_value: number | null;
+  unrealized_pnl: number | null;
+  unrealized_pnl_pct: number | null;
+  allocation_pct: number | null;
+  position_type: string | null;
+  source?: string;
+}
+
+interface PositionsResponse {
+  positions: Position[];
+  total_value: number;
+  position_count: number;
+  source?: string;
+}
+
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
+
+function formatCurrency(value: number | null | undefined) {
+  if (value === null || value === undefined) return '—';
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: 2,
+  }).format(value);
+}
+
+function formatPct(value: number | null | undefined) {
+  if (value === null || value === undefined) return '—';
+  return `${value.toFixed(1)}%`;
 }
 
 export default function PortfolioPage() {
   const [positions, setPositions] = useState<Position[]>([]);
+  const [totalValue, setTotalValue] = useState(0);
+  const [source, setSource] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    // TODO: Fetch from backend /api/positions
-    // Mock data for now
-    setPositions([
-      {
-        id: '1',
-        asset: 'BTC',
-        quantity: 0.5,
-        avgEntryPrice: 45000,
-        currentPrice: 66000,
-        unrealizedPnL: 10500,
-        unrealizedPnLPct: 46.7,
-        positionType: 'core',
-      },
-      {
-        id: '2',
-        asset: 'ETH',
-        quantity: 5,
-        avgEntryPrice: 2200,
-        currentPrice: 2000,
-        unrealizedPnL: -1000,
-        unrealizedPnLPct: -9.1,
-        positionType: 'trading',
-      },
-    ]);
-    setLoading(false);
+    async function loadPortfolio() {
+      try {
+        setLoading(true);
+        const response = await fetch(`${API_BASE_URL}/api/portfolio/positions`, {
+          cache: 'no-store',
+        });
+
+        if (!response.ok) {
+          throw new Error(`Portfolio request failed (${response.status})`);
+        }
+
+        const data: PositionsResponse = await response.json();
+        setPositions(data.positions || []);
+        setTotalValue(data.total_value || 0);
+        setSource(data.source || null);
+        setError(null);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to load portfolio');
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    loadPortfolio();
   }, []);
 
-  const totalValue = positions.reduce((sum, p) => sum + p.quantity * p.currentPrice, 0);
-  const totalPnL = positions.reduce((sum, p) => sum + p.unrealizedPnL, 0);
+  const totalPnL = useMemo(
+    () => positions.reduce((sum, position) => sum + (position.unrealized_pnl || 0), 0),
+    [positions]
+  );
+
+  if (loading) {
+    return <div className="animate-pulse text-khaki-600">Loading portfolio...</div>;
+  }
+
+  if (error) {
+    return (
+      <div className="space-y-4">
+        <h1 className="text-2xl font-bold text-gray-900">Portfolio</h1>
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-red-700">{error}</div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-gray-900">Portfolio</h1>
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Portfolio</h1>
+          {source && (
+            <p className="text-sm text-gray-500">
+              Source: {source === 'computed_from_trades' ? 'computed from local trades' : 'positions table snapshot'}
+            </p>
+          )}
+        </div>
         <button className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
           + New Trade
         </button>
       </div>
 
-      {/* Summary */}
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         <div className="bg-white rounded-lg border p-4">
           <p className="text-sm text-gray-500">Total Value</p>
-          <p className="text-2xl font-bold">${totalValue.toLocaleString()}</p>
+          <p className="text-2xl font-bold">{formatCurrency(totalValue)}</p>
         </div>
         <div className="bg-white rounded-lg border p-4">
-          <p className="text-sm text-gray-500">Unrealized P&L</p>
+          <p className="text-sm text-gray-500">Unrealized P&amp;L</p>
           <p className={`text-2xl font-bold ${totalPnL >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-            ${totalPnL.toLocaleString()}
+            {formatCurrency(totalPnL)}
           </p>
         </div>
         <div className="bg-white rounded-lg border p-4">
@@ -75,8 +123,7 @@ export default function PortfolioPage() {
         </div>
       </div>
 
-      {/* Positions Table */}
-      <div className="bg-white rounded-lg border">
+      <div className="bg-white rounded-lg border overflow-hidden">
         <table className="w-full">
           <thead className="bg-gray-50 border-b">
             <tr>
@@ -84,25 +131,39 @@ export default function PortfolioPage() {
               <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">Quantity</th>
               <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">Avg Entry</th>
               <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">Current</th>
-              <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">P&L</th>
+              <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">Value</th>
+              <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">P&amp;L</th>
+              <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">Allocation</th>
               <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">Type</th>
             </tr>
           </thead>
           <tbody className="divide-y">
-            {positions.map((position) => (
-              <tr key={position.id} className="hover:bg-gray-50">
-                <td className="px-4 py-3 font-medium">{position.asset}</td>
-                <td className="px-4 py-3 text-right">{position.quantity}</td>
-                <td className="px-4 py-3 text-right">${position.avgEntryPrice.toLocaleString()}</td>
-                <td className="px-4 py-3 text-right">${position.currentPrice.toLocaleString()}</td>
-                <td className={`px-4 py-3 text-right ${position.unrealizedPnL >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                  ${position.unrealizedPnL.toLocaleString()} ({position.unrealizedPnLPct.toFixed(1)}%)
-                </td>
-                <td className="px-4 py-3 text-right">
-                  <span className="px-2 py-1 bg-gray-100 rounded text-xs">{position.positionType}</span>
+            {positions.length === 0 ? (
+              <tr>
+                <td colSpan={8} className="px-4 py-8 text-center text-gray-500">
+                  No open positions yet. Add trades or seed the positions table.
                 </td>
               </tr>
-            ))}
+            ) : (
+              positions.map((position) => (
+                <tr key={position.asset} className="hover:bg-gray-50">
+                  <td className="px-4 py-3 font-medium">{position.asset}</td>
+                  <td className="px-4 py-3 text-right">{position.quantity.toLocaleString()}</td>
+                  <td className="px-4 py-3 text-right">{formatCurrency(position.avg_entry_price)}</td>
+                  <td className="px-4 py-3 text-right">{formatCurrency(position.current_price)}</td>
+                  <td className="px-4 py-3 text-right">{formatCurrency(position.current_value)}</td>
+                  <td className={`px-4 py-3 text-right ${(position.unrealized_pnl || 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                    {formatCurrency(position.unrealized_pnl)} ({formatPct(position.unrealized_pnl_pct)})
+                  </td>
+                  <td className="px-4 py-3 text-right">{formatPct(position.allocation_pct)}</td>
+                  <td className="px-4 py-3 text-right">
+                    <span className="px-2 py-1 bg-gray-100 rounded text-xs">
+                      {position.position_type || 'unclassified'}
+                    </span>
+                  </td>
+                </tr>
+              ))
+            )}
           </tbody>
         </table>
       </div>

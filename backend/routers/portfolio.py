@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from decimal import Decimal
 
 from db import personal_db, arete_db
+from services.portfolio_service import get_portfolio_positions
 
 router = APIRouter()
 
@@ -64,10 +65,10 @@ async def get_positions(include_prices: bool = Query(True)):
     Fetches current market prices from Arete DB if include_prices=True.
     """
     try:
-        positions = await personal_db.get_positions()
-        
+        positions, source = await get_portfolio_positions()
+
         if not positions:
-            return {"positions": [], "total_value": 0}
+            return {"positions": [], "total_value": 0, "position_count": 0, "source": source}
         
         # Get current prices if requested
         if include_prices:
@@ -98,7 +99,8 @@ async def get_positions(include_prices: bool = Query(True)):
         return {
             "positions": positions,
             "total_value": total_value,
-            "position_count": len(positions)
+            "position_count": len(positions),
+            "source": source
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -143,8 +145,8 @@ async def get_portfolio_summary():
     Returns: total value, P&L, position count, concentration metrics.
     """
     try:
-        positions = await personal_db.get_positions()
-        
+        positions, source = await get_portfolio_positions()
+
         if not positions:
             return {
                 "total_value": 0,
@@ -154,7 +156,8 @@ async def get_portfolio_summary():
                 "position_count": 0,
                 "largest_position": None,
                 "largest_position_pct": 0,
-                "allocation_by_type": {}
+                "allocation_by_type": {},
+                "source": source
             }
         
         # Get prices
@@ -196,7 +199,8 @@ async def get_portfolio_summary():
             "position_count": len(positions),
             "largest_position": largest.get("asset"),
             "largest_position_pct": largest_pct,
-            "allocation_by_type": type_alloc
+            "allocation_by_type": type_alloc,
+            "source": source
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -215,10 +219,10 @@ async def check_concentration():
     - Speculative: max 10%
     """
     try:
-        positions = await personal_db.get_positions()
-        
+        positions, source = await get_portfolio_positions()
+
         if not positions:
-            return {"alerts": [], "status": "no_positions"}
+            return {"alerts": [], "status": "no_positions", "source": source}
         
         # Get prices and calculate values
         assets = [p["asset"] for p in positions]
@@ -299,7 +303,8 @@ async def check_concentration():
                 "position_count": len(positions),
                 "allocation_by_type": {k: (v/total_value*100) for k, v in type_values.items()}
             },
-            "rules": POSITION_RULES
+            "rules": POSITION_RULES,
+            "source": source
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -134,6 +134,14 @@ class PersonalDB:
             .limit(limit)\
             .execute()
         return result.data or []
+
+    async def get_all_trades_for_portfolio(self, limit: int = 5000) -> list:
+        """Get all trades needed to rebuild current positions locally."""
+        result = self.client.table("trades").select("*")\
+            .order("executed_at")\
+            .limit(limit)\
+            .execute()
+        return result.data or []
     
     # ============================================
     # POSITIONS
