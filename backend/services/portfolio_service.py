@@ -221,6 +221,57 @@ def _serialize_closed_cycle(cycle: ClosedCycle) -> dict:
     }
 
 
+def _static_price_for_asset(asset: str, fallback_price: Any = None) -> Optional[Decimal]:
+    symbol = (asset or "").upper().strip()
+    if symbol == "USD":
+        return Decimal("1")
+
+    price = _to_decimal(fallback_price)
+    if price > ZERO:
+        return price
+    return None
+
+
+def apply_price_fallbacks(positions: list[dict], live_prices: Optional[dict[str, dict[str, Any]]] = None) -> tuple[list[dict], float]:
+    total_value = 0.0
+    live_prices = live_prices or {}
+
+    for pos in positions:
+        asset = pos["asset"]
+        fallback_price = _static_price_for_asset(asset, pos.get("current_price") or pos.get("avg_entry_price"))
+        resolved_price = None
+
+        if asset in live_prices and live_prices[asset].get("price") is not None:
+            resolved_price = float(live_prices[asset]["price"])
+            pos["price_source"] = "live"
+        elif fallback_price is not None:
+            resolved_price = float(fallback_price)
+            pos["price_source"] = "static_fallback"
+        else:
+            pos["price_source"] = "missing"
+
+        pos["current_price"] = resolved_price
+        if resolved_price is None:
+            pos["current_value"] = None
+            pos["unrealized_pnl"] = None
+            pos["unrealized_pnl_pct"] = None
+            continue
+
+        pos["current_value"] = float(pos["quantity"]) * resolved_price
+        total_value += pos["current_value"]
+
+        if pos.get("total_cost_basis"):
+            pos["unrealized_pnl"] = pos["current_value"] - float(pos["total_cost_basis"])
+            pos["unrealized_pnl_pct"] = (pos["unrealized_pnl"] / float(pos["total_cost_basis"])) * 100
+
+    if total_value > 0:
+        for pos in positions:
+            current_value = pos.get("current_value")
+            pos["allocation_pct"] = (current_value / total_value) * 100 if current_value else 0.0
+
+    return positions, total_value
+
+
 async def reconstruct_portfolio_state() -> PortfolioReconstruction:
     seed_positions = await personal_db.list_position_seeds()
     trades = await personal_db.get_all_trades_for_portfolio()
@@ -320,14 +371,26 @@ async def get_reconstructed_closed_positions() -> tuple[list[dict], str]:
 
 async def compute_daily_nav_history(days: int = 90) -> tuple[list[dict], str]:
     reconstruction = await reconstruct_portfolio_state()
-    positions = reconstruction.positions
-
-    if not positions:
+    if not reconstruction.positions:
         return [], reconstruction.source
 
-    assets = [position["asset"] for position in positions]
+    seed_positions = await personal_db.list_position_seeds()
+    trades = await personal_db.get_all_trades_for_portfolio()
+    asset_universe = sorted(
+        {
+            (seed.get("asset") or "").upper().strip()
+            for seed in seed_positions
+        }
+        | {
+            (trade.get("asset") or "").upper().strip()
+            for trade in trades
+        }
+    )
+    asset_universe = [asset for asset in asset_universe if asset]
+
+    assets = [asset for asset in asset_universe if asset != "USD"]
     price_history = await personal_db.get_stock_price_history(assets=assets, days=days)
-    if not price_history:
+    if not price_history and "USD" not in asset_universe:
         raise PortfolioDataGap(
             "No local stock_ohlcv price history is available. "
             "Create/populate public.stock_ohlcv with symbol, date, close columns to enable daily NAV."
@@ -345,21 +408,71 @@ async def compute_daily_nav_history(days: int = 90) -> tuple[list[dict], str]:
         if symbol and row_date and close is not None:
             by_symbol[symbol][row_date] = _to_decimal(close)
 
+    fallback_prices: dict[str, Decimal] = {}
+    for seed in seed_positions:
+        asset = (seed.get("asset") or "").upper().strip()
+        price = _static_price_for_asset(asset, seed.get("avg_entry_price"))
+        if asset and price is not None and asset not in fallback_prices:
+            fallback_prices[asset] = price
+
+    for trade in trades:
+        asset = (trade.get("asset") or "").upper().strip()
+        price = _static_price_for_asset(asset, trade.get("price"))
+        if asset and price is not None and asset not in fallback_prices:
+            fallback_prices[asset] = price
+
+    quantity_events: dict[str, list[tuple[str, Decimal]]] = defaultdict(list)
+    initial_holdings: dict[str, Decimal] = defaultdict(lambda: ZERO)
+    range_start_iso = start_date.isoformat()
+
+    for seed in seed_positions:
+        asset = (seed.get("asset") or "").upper().strip()
+        quantity = _to_decimal(seed.get("quantity"))
+        event_date = (_to_iso(seed.get("first_entry_date") or seed.get("last_trade_date") or seed.get("updated_at")) or today.isoformat())[:10]
+        if not asset or quantity <= ZERO:
+            continue
+        if event_date < range_start_iso:
+            initial_holdings[asset] += quantity
+        else:
+            quantity_events[event_date].append((asset, quantity))
+
+    for trade in trades:
+        asset = (trade.get("asset") or "").upper().strip()
+        side = (trade.get("side") or "").upper().strip()
+        quantity = _to_decimal(trade.get("quantity"))
+        event_date = (_to_iso(trade.get("executed_at")) or today.isoformat())[:10]
+        if not asset or quantity <= ZERO or side not in {"BUY", "SELL"}:
+            continue
+        signed_quantity = quantity if side == "BUY" else -quantity
+        if event_date < range_start_iso:
+            initial_holdings[asset] += signed_quantity
+        else:
+            quantity_events[event_date].append((asset, signed_quantity))
+
     history: list[dict] = []
     latest_seen: dict[str, Decimal] = {}
+    holdings: dict[str, Decimal] = defaultdict(lambda: ZERO, {asset: qty for asset, qty in initial_holdings.items() if qty > ZERO})
 
     for current_date in dates:
         iso_date = current_date.isoformat()
+        for asset, quantity_delta in quantity_events.get(iso_date, []):
+            holdings[asset] += quantity_delta
+            if holdings[asset] <= ZERO:
+                holdings.pop(asset, None)
+
         total_value = ZERO
         priced_assets = 0
-        for position in positions:
-            symbol = position["asset"]
+        total_assets = 0
+        for symbol, quantity in holdings.items():
+            if quantity <= ZERO:
+                continue
+            total_assets += 1
             if iso_date in by_symbol[symbol]:
                 latest_seen[symbol] = by_symbol[symbol][iso_date]
-            price = latest_seen.get(symbol)
+            price = latest_seen.get(symbol) or fallback_prices.get(symbol)
             if price is None:
                 continue
-            total_value += _to_decimal(position["quantity"]) * price
+            total_value += quantity * price
             priced_assets += 1
 
         history.append(
@@ -367,7 +480,7 @@ async def compute_daily_nav_history(days: int = 90) -> tuple[list[dict], str]:
                 "date": iso_date,
                 "nav": float(total_value),
                 "priced_assets": priced_assets,
-                "total_assets": len(positions),
+                "total_assets": total_assets,
             }
         )
 

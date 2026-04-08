@@ -10,6 +10,7 @@ from decimal import Decimal
 from db import arete_db
 from services.portfolio_service import (
     PortfolioDataGap,
+    apply_price_fallbacks,
     compute_daily_nav_history,
     get_portfolio_positions,
     get_reconstructed_closed_positions,
@@ -75,31 +76,13 @@ async def get_positions(include_prices: bool = Query(True)):
         if not positions:
             return {"positions": [], "total_value": 0, "position_count": 0, "source": source}
         
-        # Get current prices if requested
+        total_value = 0
         if include_prices:
             assets = [p["asset"] for p in positions]
             prices = await arete_db.get_current_prices(assets)
-            
-            total_value = 0
-            for pos in positions:
-                asset = pos["asset"]
-                if asset in prices:
-                    price = prices[asset]["price"]
-                    pos["current_price"] = price
-                    pos["current_value"] = float(pos["quantity"]) * price
-                    total_value += pos["current_value"]
-                    
-                    if pos.get("total_cost_basis"):
-                        pos["unrealized_pnl"] = pos["current_value"] - float(pos["total_cost_basis"])
-                        pos["unrealized_pnl_pct"] = (pos["unrealized_pnl"] / float(pos["total_cost_basis"])) * 100
-            
-            # Calculate allocation percentages
-            if total_value > 0:
-                for pos in positions:
-                    if pos.get("current_value"):
-                        pos["allocation_pct"] = (pos["current_value"] / total_value) * 100
-        
-        total_value = sum(p.get("current_value", 0) or 0 for p in positions)
+            positions, total_value = apply_price_fallbacks(positions, prices)
+        else:
+            positions, total_value = apply_price_fallbacks(positions, {})
         
         return {
             "positions": positions,
@@ -167,18 +150,9 @@ async def get_portfolio_summary():
                 "source": source
             }
         
-        # Get prices
         assets = [p["asset"] for p in positions]
         prices = await arete_db.get_current_prices(assets)
-        
-        # Calculate values
-        for pos in positions:
-            asset = pos["asset"]
-            if asset in prices:
-                pos["current_price"] = prices[asset]["price"]
-                pos["current_value"] = float(pos["quantity"]) * prices[asset]["price"]
-        
-        total_value = sum(p.get("current_value", 0) or 0 for p in positions)
+        positions, total_value = apply_price_fallbacks(positions, prices)
         total_cost = sum(float(p.get("total_cost_basis", 0) or 0) for p in positions)
         total_pnl = total_value - total_cost
         
@@ -231,15 +205,9 @@ async def check_concentration():
         if not positions:
             return {"alerts": [], "status": "no_positions", "source": source}
         
-        # Get prices and calculate values
         assets = [p["asset"] for p in positions]
         prices = await arete_db.get_current_prices(assets)
-        
-        for pos in positions:
-            if pos["asset"] in prices:
-                pos["current_value"] = float(pos["quantity"]) * prices[pos["asset"]]["price"]
-        
-        total_value = sum(p.get("current_value", 0) or 0 for p in positions)
+        positions, total_value = apply_price_fallbacks(positions, prices)
         
         if total_value == 0:
             return {"alerts": [], "status": "no_value"}
