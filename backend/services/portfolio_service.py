@@ -18,7 +18,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
-from db import personal_db
+from db import arete_db, personal_db
 
 
 ZERO = Decimal("0")
@@ -243,7 +243,7 @@ def apply_price_fallbacks(positions: list[dict], live_prices: Optional[dict[str,
 
         if asset in live_prices and live_prices[asset].get("price") is not None:
             resolved_price = float(live_prices[asset]["price"])
-            pos["price_source"] = "live"
+            pos["price_source"] = live_prices[asset].get("source") or "live"
         elif fallback_price is not None:
             resolved_price = float(fallback_price)
             pos["price_source"] = "static_fallback"
@@ -260,16 +260,75 @@ def apply_price_fallbacks(positions: list[dict], live_prices: Optional[dict[str,
         pos["current_value"] = float(pos["quantity"]) * resolved_price
         total_value += pos["current_value"]
 
-        if pos.get("total_cost_basis"):
-            pos["unrealized_pnl"] = pos["current_value"] - float(pos["total_cost_basis"])
-            pos["unrealized_pnl_pct"] = (pos["unrealized_pnl"] / float(pos["total_cost_basis"])) * 100
+        if pos.get("total_cost_basis") is not None:
+            cost_basis = float(pos.get("total_cost_basis") or 0)
+            pos["unrealized_pnl"] = pos["current_value"] - cost_basis
+            pos["unrealized_pnl_pct"] = (pos["unrealized_pnl"] / cost_basis) * 100 if cost_basis else None
 
-    if total_value > 0:
+    if total_value:
         for pos in positions:
             current_value = pos.get("current_value")
-            pos["allocation_pct"] = (current_value / total_value) * 100 if current_value else 0.0
+            pos["allocation_pct"] = (current_value / total_value) * 100 if current_value is not None else None
 
     return positions, total_value
+
+
+def _trade_cash_delta(trade: dict) -> Decimal:
+    quote_currency = (trade.get("quote_currency") or "USD").upper().strip()
+    if quote_currency != "USD":
+        return ZERO
+
+    if trade.get("cash_flow") is not None:
+        return _to_decimal(trade.get("cash_flow"))
+
+    side = (trade.get("side") or "").upper().strip()
+    quantity = _to_decimal(trade.get("quantity"))
+    price = _to_decimal(trade.get("price"))
+    gross = quantity * price
+    return -gross if side == "BUY" else gross if side == "SELL" else ZERO
+
+
+async def get_latest_price_map(assets: list[str], trades: Optional[list[dict]] = None) -> dict[str, dict[str, Any]]:
+    asset_list = sorted({(asset or "").upper().strip() for asset in assets if asset})
+    if not asset_list:
+        return {}
+
+    combined: dict[str, dict[str, Any]] = {}
+
+    arete_prices = await arete_db.get_current_prices(asset_list)
+    for asset, payload in arete_prices.items():
+        if payload.get("price") is not None:
+            combined[asset] = {**payload, "source": "arete_latest"}
+
+    missing_assets = [asset for asset in asset_list if asset not in combined and asset != "USD"]
+    if missing_assets:
+        local_stock_prices = await personal_db.get_latest_stock_prices(missing_assets)
+        for asset, payload in local_stock_prices.items():
+            if payload.get("price") is not None and asset not in combined:
+                combined[asset] = payload
+
+    if trades is None:
+        trades = await personal_db.get_all_trades_for_portfolio()
+
+    latest_trade_prices: dict[str, dict[str, Any]] = {}
+    for trade in reversed(trades):
+        asset = (trade.get("asset") or "").upper().strip()
+        if not asset or asset in combined or asset in latest_trade_prices:
+            continue
+        price = trade.get("price")
+        if price is None:
+            continue
+        latest_trade_prices[asset] = {
+            "price": float(price),
+            "date": trade.get("executed_at"),
+            "source": "latest_trade_price",
+        }
+
+    for asset, payload in latest_trade_prices.items():
+        combined.setdefault(asset, payload)
+
+    combined.setdefault("USD", {"price": 1.0, "source": "usd_parity", "date": None})
+    return combined
 
 
 async def reconstruct_portfolio_state() -> PortfolioReconstruction:
@@ -310,6 +369,16 @@ async def reconstruct_portfolio_state() -> PortfolioReconstruction:
         else:
             _apply_sell(ledger, quantity, price, executed_at, trade)
 
+        cash_delta = _trade_cash_delta(trade)
+        if cash_delta:
+            cash_ledger = ledgers.setdefault("USD", AssetLedger(asset="USD"))
+            cash_ledger.quantity += cash_delta
+            cash_ledger.total_cost_basis += cash_delta
+            cash_ledger.first_entry_date = cash_ledger.first_entry_date or executed_at
+            cash_ledger.last_trade_date = executed_at or cash_ledger.last_trade_date
+            cash_ledger.number_of_trades += 1
+            cash_ledger.position_type = cash_ledger.position_type or "cash"
+
     positions: list[dict] = []
     closed_positions: list[dict] = []
 
@@ -317,7 +386,7 @@ async def reconstruct_portfolio_state() -> PortfolioReconstruction:
         for cycle in ledger.closed_cycles:
             closed_positions.append(_serialize_closed_cycle(cycle))
 
-        if ledger.quantity <= ZERO:
+        if ledger.quantity == ZERO:
             continue
 
         avg_entry_price = (ledger.total_cost_basis / ledger.quantity) if ledger.quantity > ZERO else None
@@ -449,22 +518,29 @@ async def compute_daily_nav_history(days: int = 90) -> tuple[list[dict], str]:
         else:
             quantity_events[event_date].append((asset, signed_quantity))
 
+        cash_delta = _trade_cash_delta(trade)
+        if cash_delta:
+            if event_date < range_start_iso:
+                initial_holdings["USD"] += cash_delta
+            else:
+                quantity_events[event_date].append(("USD", cash_delta))
+
     history: list[dict] = []
     latest_seen: dict[str, Decimal] = {}
-    holdings: dict[str, Decimal] = defaultdict(lambda: ZERO, {asset: qty for asset, qty in initial_holdings.items() if qty > ZERO})
+    holdings: dict[str, Decimal] = defaultdict(lambda: ZERO, {asset: qty for asset, qty in initial_holdings.items() if qty != ZERO})
 
     for current_date in dates:
         iso_date = current_date.isoformat()
         for asset, quantity_delta in quantity_events.get(iso_date, []):
             holdings[asset] += quantity_delta
-            if holdings[asset] <= ZERO:
+            if holdings[asset] == ZERO:
                 holdings.pop(asset, None)
 
         total_value = ZERO
         priced_assets = 0
         total_assets = 0
         for symbol, quantity in holdings.items():
-            if quantity <= ZERO:
+            if quantity == ZERO:
                 continue
             total_assets += 1
             if iso_date in by_symbol[symbol]:

@@ -218,6 +218,31 @@ class PersonalDB:
         except Exception as exc:
             logger.warning("stock_ohlcv unavailable in personal DB: %s", exc)
             return []
+
+    async def get_latest_stock_prices(self, assets: list[str]) -> dict:
+        """Get latest local stock close per asset from stock_ohlcv when available."""
+        if not assets:
+            return {}
+
+        try:
+            result = self.client.table("stock_ohlcv").select("symbol, date, close")\
+                .in_("symbol", [asset.upper() for asset in assets])\
+                .order("date", desc=True)\
+                .execute()
+        except Exception as exc:
+            logger.warning("latest stock_ohlcv unavailable in personal DB: %s", exc)
+            return {}
+
+        latest_prices: dict[str, dict] = {}
+        for row in result.data or []:
+            symbol = (row.get("symbol") or "").upper()
+            if symbol and symbol not in latest_prices and row.get("close") is not None:
+                latest_prices[symbol] = {
+                    "price": float(row["close"]),
+                    "date": row.get("date"),
+                    "source": "personal_db_stock_ohlcv",
+                }
+        return latest_prices
     
     # ============================================
     # JOURNAL

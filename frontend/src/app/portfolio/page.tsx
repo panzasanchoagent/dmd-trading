@@ -3,9 +3,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   CartesianGrid,
+  Cell,
   Legend,
   Line,
   LineChart,
+  Pie,
+  PieChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -61,6 +64,7 @@ interface ClosedResponse {
 }
 
 interface NavHistoryResponse {
+  days: number;
   history: NavPoint[];
   gap?: string;
 }
@@ -68,13 +72,17 @@ interface NavHistoryResponse {
 interface PerformanceResponse {
   total_trades: number;
   total_realized_pnl: number;
+  total_unrealized_pnl: number;
+  total_pnl: number;
   win_rate: number;
   expectancy: number;
   profit_factor: number;
 }
 
+const PIE_COLORS = ['#2563eb', '#16a34a', '#dc2626', '#ca8a04', '#7c3aed', '#0891b2'];
+
 function formatCurrency(value: number | null | undefined) {
-  if (value === null || value === undefined) return '—';
+  if (value === null || value === undefined || Number.isNaN(value)) return '—';
   return new Intl.NumberFormat('en-US', {
     style: 'currency',
     currency: 'USD',
@@ -113,6 +121,21 @@ async function fetchJson<T>(path: string): Promise<T> {
   return response.json();
 }
 
+function computeMaxDrawdown(history: NavPoint[]) {
+  let peak = Number.NEGATIVE_INFINITY;
+  let maxDrawdown = 0;
+
+  for (const point of history) {
+    if (point.nav > peak) peak = point.nav;
+    if (peak > 0) {
+      const drawdown = ((point.nav - peak) / peak) * 100;
+      if (drawdown < maxDrawdown) maxDrawdown = drawdown;
+    }
+  }
+
+  return maxDrawdown;
+}
+
 export default function PortfolioPage() {
   const [positions, setPositions] = useState<Position[]>([]);
   const [totalValue, setTotalValue] = useState(0);
@@ -120,6 +143,7 @@ export default function PortfolioPage() {
   const [closedPositions, setClosedPositions] = useState<ClosedPosition[]>([]);
   const [navHistory, setNavHistory] = useState<NavPoint[]>([]);
   const [navGap, setNavGap] = useState<string | null>(null);
+  const [navDays, setNavDays] = useState<number | null>(null);
   const [performance, setPerformance] = useState<PerformanceResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -130,9 +154,9 @@ export default function PortfolioPage() {
         setLoading(true);
         const [positionsData, closedData, navData, performanceData] = await Promise.all([
           fetchJson<PositionsResponse>('/api/portfolio/positions'),
-          fetchJson<ClosedResponse>('/api/portfolio/closed?limit=10'),
-          fetchJson<NavHistoryResponse>('/api/portfolio/nav-history?days=90'),
-          fetchJson<PerformanceResponse>('/api/portfolio/performance?days=365'),
+          fetchJson<ClosedResponse>('/api/portfolio/closed?limit=25'),
+          fetchJson<NavHistoryResponse>('/api/portfolio/nav-history'),
+          fetchJson<PerformanceResponse>('/api/portfolio/performance'),
         ]);
 
         setPositions(positionsData.positions || []);
@@ -141,6 +165,7 @@ export default function PortfolioPage() {
         setClosedPositions(closedData.closed_positions || []);
         setNavHistory(navData.history || []);
         setNavGap(navData.gap || null);
+        setNavDays(navData.days || null);
         setPerformance(performanceData);
         setError(null);
       } catch (err) {
@@ -158,7 +183,28 @@ export default function PortfolioPage() {
     [positions]
   );
 
+  const cashPosition = useMemo(
+    () => positions.find((position) => position.asset === 'USD') || null,
+    [positions]
+  );
+
+  const investedValue = useMemo(
+    () => positions.filter((position) => position.asset !== 'USD').reduce((sum, position) => sum + (position.current_value || 0), 0),
+    [positions]
+  );
+
+  const pieData = useMemo(
+    () => positions.filter((position) => (position.current_value || 0) !== 0).map((position) => ({ name: position.asset, value: Math.abs(position.current_value || 0) })),
+    [positions]
+  );
+
+  const topPnL = useMemo(
+    () => [...positions].filter((position) => position.asset !== 'USD').sort((a, b) => (b.unrealized_pnl || 0) - (a.unrealized_pnl || 0)),
+    [positions]
+  );
+
   const latestNav = navHistory.length ? navHistory[navHistory.length - 1]?.nav || 0 : totalValue;
+  const maxDrawdown = useMemo(() => computeMaxDrawdown(navHistory), [navHistory]);
 
   if (loading) {
     return <div className="animate-pulse text-khaki-600">Loading portfolio...</div>;
@@ -190,25 +236,12 @@ export default function PortfolioPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
-        <div className="rounded-lg border bg-white p-4">
-          <p className="text-sm text-gray-500">Total Value</p>
-          <p className="text-2xl font-bold">{formatCurrency(totalValue)}</p>
-        </div>
-        <div className="rounded-lg border bg-white p-4">
-          <p className="text-sm text-gray-500">Unrealized P&amp;L</p>
-          <p className={`text-2xl font-bold ${totalUnrealizedPnL >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-            {formatCurrency(totalUnrealizedPnL)}
-          </p>
-        </div>
-        <div className="rounded-lg border bg-white p-4">
-          <p className="text-sm text-gray-500">Closed Trades</p>
-          <p className="text-2xl font-bold">{performance?.total_trades ?? closedPositions.length}</p>
-        </div>
-        <div className="rounded-lg border bg-white p-4">
-          <p className="text-sm text-gray-500">Win Rate</p>
-          <p className="text-2xl font-bold">{formatPct(performance?.win_rate)}</p>
-        </div>
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+        <MetricCard label="Total Value" value={formatCurrency(totalValue)} />
+        <MetricCard label="Unrealized P&L" value={formatCurrency(totalUnrealizedPnL)} tone={totalUnrealizedPnL >= 0 ? 'positive' : 'negative'} />
+        <MetricCard label="Realized P&L" value={formatCurrency(performance?.total_realized_pnl)} tone={(performance?.total_realized_pnl || 0) >= 0 ? 'positive' : 'negative'} />
+        <MetricCard label="Cash" value={formatCurrency(cashPosition?.current_value)} tone={(cashPosition?.current_value || 0) >= 0 ? 'default' : 'negative'} />
+        <MetricCard label="Max Drawdown" value={formatPct(maxDrawdown)} tone={maxDrawdown >= 0 ? 'default' : 'negative'} />
       </div>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
@@ -216,7 +249,7 @@ export default function PortfolioPage() {
           <div className="mb-4 flex items-center justify-between">
             <div>
               <h2 className="text-lg font-semibold text-gray-900">NAV history</h2>
-              <p className="text-sm text-gray-500">90 day reconstructed portfolio value</p>
+              <p className="text-sm text-gray-500">Default view is YTD{navDays ? ` (${navDays} days loaded)` : ''}</p>
             </div>
             <div className="text-right">
               <p className="text-xs uppercase tracking-wide text-gray-400">Latest NAV</p>
@@ -244,12 +277,67 @@ export default function PortfolioPage() {
         </div>
 
         <div className="rounded-lg border bg-white p-4">
-          <h2 className="text-lg font-semibold text-gray-900">Performance</h2>
-          <div className="mt-4 space-y-3 text-sm">
-            <div className="flex items-center justify-between"><span className="text-gray-500">Realized P&amp;L</span><span className="font-medium">{formatCurrency(performance?.total_realized_pnl)}</span></div>
-            <div className="flex items-center justify-between"><span className="text-gray-500">Expectancy</span><span className="font-medium">{formatCurrency(performance?.expectancy)}</span></div>
-            <div className="flex items-center justify-between"><span className="text-gray-500">Profit factor</span><span className="font-medium">{performance?.profit_factor === Infinity ? '∞' : performance?.profit_factor?.toFixed(2) ?? '—'}</span></div>
-            <div className="flex items-center justify-between"><span className="text-gray-500">Open positions</span><span className="font-medium">{positions.length}</span></div>
+          <h2 className="text-lg font-semibold text-gray-900">Portfolio mix</h2>
+          {pieData.length > 0 ? (
+            <>
+              <div className="mt-4 h-64">
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie data={pieData} dataKey="value" nameKey="name" outerRadius={90} label>
+                      {pieData.map((entry, index) => (
+                        <Cell key={entry.name} fill={PIE_COLORS[index % PIE_COLORS.length]} />
+                      ))}
+                    </Pie>
+                    <Tooltip formatter={(value: number) => formatCurrency(value)} />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="space-y-2 text-sm">
+                <div className="flex items-center justify-between"><span className="text-gray-500">Invested</span><span className="font-medium">{formatCurrency(investedValue)}</span></div>
+                <div className="flex items-center justify-between"><span className="text-gray-500">Cash weight</span><span className="font-medium">{formatPct(cashPosition?.allocation_pct)}</span></div>
+                <div className="flex items-center justify-between"><span className="text-gray-500">Closed trades</span><span className="font-medium">{performance?.total_trades ?? closedPositions.length}</span></div>
+                <div className="flex items-center justify-between"><span className="text-gray-500">Win rate</span><span className="font-medium">{formatPct(performance?.win_rate)}</span></div>
+                <div className="flex items-center justify-between"><span className="text-gray-500">Profit factor</span><span className="font-medium">{performance?.profit_factor === Infinity ? '∞' : performance?.profit_factor?.toFixed(2) ?? '—'}</span></div>
+              </div>
+            </>
+          ) : (
+            <div className="mt-4 rounded-lg border border-dashed p-6 text-sm text-gray-500">No position values available yet.</div>
+          )}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+        <div className="rounded-lg border bg-white p-4">
+          <h2 className="text-lg font-semibold text-gray-900">Current portfolio health</h2>
+          <div className="mt-4 grid grid-cols-2 gap-4 text-sm">
+            <StatRow label="Total P&L" value={formatCurrency(performance?.total_pnl)} tone={(performance?.total_pnl || 0) >= 0 ? 'positive' : 'negative'} />
+            <StatRow label="Expectancy" value={formatCurrency(performance?.expectancy)} />
+            <StatRow label="Open positions" value={String(positions.length)} />
+            <StatRow label="Priced NAV" value={formatCurrency(latestNav)} />
+            <StatRow label="Cash quantity" value={cashPosition ? cashPosition.quantity.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—'} tone={(cashPosition?.quantity || 0) >= 0 ? 'default' : 'negative'} />
+            <StatRow label="Cash price source" value={cashPosition?.price_source || '—'} />
+          </div>
+        </div>
+
+        <div className="rounded-lg border bg-white p-4">
+          <h2 className="text-lg font-semibold text-gray-900">Open P&L leaderboard</h2>
+          <div className="mt-4 space-y-3">
+            {topPnL.length === 0 ? (
+              <div className="text-sm text-gray-500">No open positions yet.</div>
+            ) : (
+              topPnL.slice(0, 5).map((position) => (
+                <div key={position.asset} className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2 text-sm">
+                  <div>
+                    <p className="font-medium text-gray-900">{position.asset}</p>
+                    <p className="text-gray-500">{formatCurrency(position.current_price)} · {position.price_source || 'n/a'}</p>
+                  </div>
+                  <div className={`text-right font-medium ${(position.unrealized_pnl || 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                    <p>{formatCurrency(position.unrealized_pnl)}</p>
+                    <p className="text-xs">{formatPct(position.unrealized_pnl_pct)}</p>
+                  </div>
+                </div>
+              ))
+            )}
           </div>
         </div>
       </div>
@@ -259,7 +347,7 @@ export default function PortfolioPage() {
           <h2 className="text-lg font-semibold text-gray-900">Open positions</h2>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1000px]">
+          <table className="w-full min-w-[1120px]">
             <thead className="bg-gray-50 border-b">
               <tr>
                 <th className="px-4 py-3 text-left text-sm font-medium text-gray-500">Asset</th>
@@ -269,9 +357,9 @@ export default function PortfolioPage() {
                 <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">Avg Entry</th>
                 <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">Current</th>
                 <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">Value</th>
-                <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">P&amp;L</th>
+                <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">P&L</th>
                 <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">Allocation</th>
-                <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">Type</th>
+                <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">Price Source</th>
               </tr>
             </thead>
             <tbody className="divide-y">
@@ -295,9 +383,7 @@ export default function PortfolioPage() {
                       {formatCurrency(position.unrealized_pnl)} ({formatPct(position.unrealized_pnl_pct)})
                     </td>
                     <td className="px-4 py-3 text-right">{formatPct(position.allocation_pct)}</td>
-                    <td className="px-4 py-3 text-right">
-                      <span className="rounded bg-gray-100 px-2 py-1 text-xs">{position.position_type || 'unclassified'}</span>
-                    </td>
+                    <td className="px-4 py-3 text-right text-xs text-gray-500">{position.price_source || '—'}</td>
                   </tr>
                 ))
               )}
@@ -319,7 +405,7 @@ export default function PortfolioPage() {
                 <th className="px-4 py-3 text-left text-sm font-medium text-gray-500">Exit</th>
                 <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">Trades</th>
                 <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">Holding Days</th>
-                <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">Realized P&amp;L</th>
+                <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">Realized P&L</th>
                 <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">Return</th>
               </tr>
             </thead>
@@ -345,6 +431,26 @@ export default function PortfolioPage() {
           </table>
         </div>
       </div>
+    </div>
+  );
+}
+
+function MetricCard({ label, value, tone = 'default' }: { label: string; value: string; tone?: 'default' | 'positive' | 'negative' }) {
+  const toneClass = tone === 'positive' ? 'text-green-600' : tone === 'negative' ? 'text-red-600' : 'text-gray-900';
+  return (
+    <div className="rounded-lg border bg-white p-4">
+      <p className="text-sm text-gray-500">{label}</p>
+      <p className={`text-2xl font-bold ${toneClass}`}>{value}</p>
+    </div>
+  );
+}
+
+function StatRow({ label, value, tone = 'default' }: { label: string; value: string; tone?: 'default' | 'positive' | 'negative' }) {
+  const toneClass = tone === 'positive' ? 'text-green-600' : tone === 'negative' ? 'text-red-600' : 'text-gray-900';
+  return (
+    <div className="rounded-lg bg-gray-50 p-3">
+      <p className="text-xs uppercase tracking-wide text-gray-500">{label}</p>
+      <p className={`mt-1 text-base font-semibold ${toneClass}`}>{value}</p>
     </div>
   );
 }

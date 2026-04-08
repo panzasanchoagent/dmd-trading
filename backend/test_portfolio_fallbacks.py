@@ -60,8 +60,8 @@ class PortfolioFallbackTests(unittest.IsolatedAsyncioTestCase):
         mar_13 = next(point for point in history if point['date'] == '2026-03-13')
 
         self.assertEqual(source, 'positions_plus_trades')
-        self.assertAlmostEqual(jan_27['nav'], 49592.2102, places=4)
-        self.assertAlmostEqual(mar_13['nav'], 48000.0, places=4)
+        self.assertAlmostEqual(jan_27['nav'], 48000.0, places=4)
+        self.assertAlmostEqual(mar_13['nav'], 47317.9694, places=4)
 
 
 if __name__ == '__main__':

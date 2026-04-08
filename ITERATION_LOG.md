@@ -101,3 +101,38 @@
 
 ### Time Spent
 - ~20 minutes
+
+---
+
+## Loop 4 — Trade log wiring + backend verification cleanup
+
+### Changes Made
+- Replaced the Trades page mock rows with live `/api/trades` fetching, filters, and summary cards so the tab now surfaces the full local trade log.
+- Added gross and cash-flow columns so trade cash movement is visible alongside execution details.
+- Fixed a real backend regression in `portfolio_service` where `arete_db` was referenced without being imported.
+- Updated the backend fallback test expectations to match the new dynamic USD cash accounting behavior.
+
+### Test Results
+- Portfolio reconstruction script via `backend/venv/bin/python`: ✅
+- Dynamic USD cash position shows up in reconstructed positions: ✅
+- Backend regression test (`backend/venv/bin/python -m unittest backend/test_portfolio_fallbacks.py`): ✅
+- Frontend static verification of Trades page wiring: ✅
+- Frontend build/lint: ⚠️ still blocked in this checkout because frontend dependencies are not installed locally
+
+### Bugs Found
+1. `frontend/src/app/trades/page.tsx` was still entirely mock data, so the Trades tab never reflected real DB trades.
+2. `get_latest_price_map()` referenced `arete_db` without importing it, which would break live price enrichment in direct module execution.
+3. The backend fallback test still asserted the old static-cash NAV behavior after the new cash-ledger logic landed.
+
+### Fixes Applied
+- Wired Trades UI to `/api/trades?limit=500` with client-side asset/strategy/date filters.
+- Added backend import fix for `arete_db`.
+- Updated the NAV fallback test to reflect dynamic cash debits/credits.
+
+### Verification
+- Reconstructed portfolio currently resolves 3 open positions, 13 closed positions, and a live USD cash ledger entry.
+- The Trades page now requests the real trade dataset instead of rendering placeholders.
+- Backend verification passes under the project backend virtualenv.
+
+### Time Spent
+- ~20 minutes

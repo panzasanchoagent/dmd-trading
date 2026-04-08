@@ -2,18 +2,20 @@
 Portfolio Router - Positions, allocations, and concentration checks.
 """
 
+from datetime import date
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from decimal import Decimal
 
-from db import arete_db
 from services.portfolio_service import (
     PortfolioDataGap,
     apply_price_fallbacks,
     compute_daily_nav_history,
+    get_latest_price_map,
     get_portfolio_positions,
     get_reconstructed_closed_positions,
+    reconstruct_portfolio_state,
 )
 
 router = APIRouter()
@@ -76,13 +78,9 @@ async def get_positions(include_prices: bool = Query(True)):
         if not positions:
             return {"positions": [], "total_value": 0, "position_count": 0, "source": source}
         
-        total_value = 0
-        if include_prices:
-            assets = [p["asset"] for p in positions]
-            prices = await arete_db.get_current_prices(assets)
-            positions, total_value = apply_price_fallbacks(positions, prices)
-        else:
-            positions, total_value = apply_price_fallbacks(positions, {})
+        assets = [p["asset"] for p in positions]
+        prices = await get_latest_price_map(assets) if include_prices else {}
+        positions, total_value = apply_price_fallbacks(positions, prices)
         
         return {
             "positions": positions,
@@ -151,7 +149,7 @@ async def get_portfolio_summary():
             }
         
         assets = [p["asset"] for p in positions]
-        prices = await arete_db.get_current_prices(assets)
+        prices = await get_latest_price_map(assets)
         positions, total_value = apply_price_fallbacks(positions, prices)
         total_cost = sum(float(p.get("total_cost_basis", 0) or 0) for p in positions)
         total_pnl = total_value - total_cost
@@ -206,7 +204,7 @@ async def check_concentration():
             return {"alerts": [], "status": "no_positions", "source": source}
         
         assets = [p["asset"] for p in positions]
-        prices = await arete_db.get_current_prices(assets)
+        prices = await get_latest_price_map(assets)
         positions, total_value = apply_price_fallbacks(positions, prices)
         
         if total_value == 0:
@@ -286,18 +284,20 @@ async def check_concentration():
 
 
 @router.get("/nav-history")
-async def get_nav_history(days: int = Query(90, ge=7, le=3650)):
-    """Get reconstructed daily NAV using local stock_ohlcv history when available."""
+async def get_nav_history(days: Optional[int] = Query(None, ge=7, le=3650)):
+    """Get reconstructed daily NAV using local price history, defaulting to year-to-date."""
+    today = date.today()
+    resolved_days = days or max((today - date(today.year, 1, 1)).days + 1, 7)
     try:
-        history, source = await compute_daily_nav_history(days=days)
+        history, source = await compute_daily_nav_history(days=resolved_days)
         return {
-            "days": days,
+            "days": resolved_days,
             "history": history,
             "source": source,
         }
     except PortfolioDataGap as exc:
         return {
-            "days": days,
+            "days": resolved_days,
             "history": [],
             "source": "positions_plus_trades",
             "gap": str(exc),
@@ -307,10 +307,11 @@ async def get_nav_history(days: int = Query(90, ge=7, le=3650)):
 
 
 @router.get("/performance")
-async def get_performance_metrics(days: int = Query(30, ge=7, le=365)):
+async def get_performance_metrics(days: int = Query(365, ge=7, le=3650)):
     """Get portfolio performance metrics over time."""
     try:
-        closed, source = await get_reconstructed_closed_positions()
+        reconstruction = await reconstruct_portfolio_state()
+        closed, source = reconstruction.closed_positions, reconstruction.source
         
         # Filter by date range
         from datetime import datetime, timedelta
@@ -321,6 +322,8 @@ async def get_performance_metrics(days: int = Query(30, ge=7, le=365)):
             return {
                 "period_days": days,
                 "total_realized_pnl": 0,
+                "total_unrealized_pnl": 0,
+                "total_pnl": 0,
                 "win_rate": 0,
                 "avg_win": 0,
                 "avg_loss": 0,
@@ -341,10 +344,18 @@ async def get_performance_metrics(days: int = Query(30, ge=7, le=365)):
         win_pnls = [float(p.get("realized_pnl", 0) or 0) for p in wins]
         loss_pnls = [float(p.get("realized_pnl", 0) or 0) for p in losses]
         
+        priced_positions, _ = apply_price_fallbacks(
+            reconstruction.positions,
+            await get_latest_price_map([p["asset"] for p in reconstruction.positions]),
+        )
+        total_unrealized_pnl = sum(float(p.get("unrealized_pnl") or 0) for p in priced_positions)
+
         return {
             "period_days": days,
             "total_trades": len(closed),
             "total_realized_pnl": total_pnl,
+            "total_unrealized_pnl": total_unrealized_pnl,
+            "total_pnl": total_pnl + total_unrealized_pnl,
             "win_rate": (len(wins) / len(closed) * 100) if closed else 0,
             "avg_win": (sum(win_pnls) / len(win_pnls)) if win_pnls else 0,
             "avg_loss": (sum(loss_pnls) / len(loss_pnls)) if loss_pnls else 0,
