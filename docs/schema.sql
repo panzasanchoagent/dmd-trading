@@ -16,6 +16,7 @@ CREATE TABLE trades (
     quantity DECIMAL(20, 8) NOT NULL,
     price DECIMAL(20, 8) NOT NULL,
     quote_currency VARCHAR(10) DEFAULT 'USD',
+    source_platform VARCHAR(50),             -- ibkr, manual, etc.
     
     -- Timing
     executed_at TIMESTAMPTZ NOT NULL,
@@ -52,6 +53,7 @@ CREATE TABLE trades (
 CREATE INDEX idx_trades_asset ON trades(asset);
 CREATE INDEX idx_trades_executed_at ON trades(executed_at DESC);
 CREATE INDEX idx_trades_strategy ON trades(strategy);
+CREATE INDEX idx_trades_source_platform ON trades(source_platform);
 
 -- ============================================
 -- POSITIONS

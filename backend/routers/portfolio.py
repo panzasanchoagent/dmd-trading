@@ -2,13 +2,18 @@
 Portfolio Router - Positions, allocations, and concentration checks.
 """
 
-from typing import Optional, List
+from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from decimal import Decimal
 
-from db import personal_db, arete_db
-from services.portfolio_service import get_portfolio_positions
+from db import arete_db
+from services.portfolio_service import (
+    PortfolioDataGap,
+    compute_daily_nav_history,
+    get_portfolio_positions,
+    get_reconstructed_closed_positions,
+)
 
 router = APIRouter()
 
@@ -114,11 +119,12 @@ async def get_closed_positions(
 ):
     """Get closed position history with P&L."""
     try:
-        closed = await personal_db.get_closed_positions(
-            start_date=start_date,
-            end_date=end_date,
-            limit=limit
-        )
+        closed, source = await get_reconstructed_closed_positions()
+        if start_date:
+            closed = [position for position in closed if (position.get("exit_date") or "") >= start_date]
+        if end_date:
+            closed = [position for position in closed if (position.get("exit_date") or "") <= end_date]
+        closed = closed[:limit]
         
         # Calculate summary stats
         total_pnl = sum(float(p.get("realized_pnl", 0) or 0) for p in closed)
@@ -131,7 +137,8 @@ async def get_closed_positions(
             "total_realized_pnl": total_pnl,
             "wins": wins,
             "losses": losses,
-            "win_rate": (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
+            "win_rate": (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0,
+            "source": source,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -310,11 +317,32 @@ async def check_concentration():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/nav-history")
+async def get_nav_history(days: int = Query(90, ge=7, le=3650)):
+    """Get reconstructed daily NAV using local stock_ohlcv history when available."""
+    try:
+        history, source = await compute_daily_nav_history(days=days)
+        return {
+            "days": days,
+            "history": history,
+            "source": source,
+        }
+    except PortfolioDataGap as exc:
+        return {
+            "days": days,
+            "history": [],
+            "source": "positions_plus_trades",
+            "gap": str(exc),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/performance")
 async def get_performance_metrics(days: int = Query(30, ge=7, le=365)):
     """Get portfolio performance metrics over time."""
     try:
-        closed = await personal_db.get_closed_positions(limit=500)
+        closed, source = await get_reconstructed_closed_positions()
         
         # Filter by date range
         from datetime import datetime, timedelta
@@ -330,7 +358,8 @@ async def get_performance_metrics(days: int = Query(30, ge=7, le=365)):
                 "avg_loss": 0,
                 "profit_factor": 0,
                 "largest_win": 0,
-                "largest_loss": 0
+                "largest_loss": 0,
+                "source": source,
             }
         
         # Calculate metrics
@@ -354,7 +383,8 @@ async def get_performance_metrics(days: int = Query(30, ge=7, le=365)):
             "profit_factor": (gross_profit / gross_loss) if gross_loss > 0 else float('inf'),
             "largest_win": max(win_pnls) if win_pnls else 0,
             "largest_loss": min(loss_pnls) if loss_pnls else 0,
-            "expectancy": (total_pnl / len(closed)) if closed else 0
+            "expectancy": (total_pnl / len(closed)) if closed else 0,
+            "source": source,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

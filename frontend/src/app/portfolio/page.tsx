@@ -97,7 +97,11 @@ export default function PortfolioPage() {
           <h1 className="text-2xl font-bold text-gray-900">Portfolio</h1>
           {source && (
             <p className="text-sm text-gray-500">
-              Source: {source === 'computed_from_trades' ? 'computed from local trades' : 'positions table snapshot'}
+              Source: {source === 'positions_plus_trades'
+                ? 'reconstructed from seeded positions plus local trades'
+                : source === 'positions_only'
+                  ? 'seeded positions only'
+                  : 'local trades only'}
             </p>
           )}
         </div>

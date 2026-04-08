@@ -45,7 +45,7 @@ Personal trading execution system with AI coaching.
 - Current positions with live P&L
 - Historical closed positions
 - Exposure by asset/sector
-- Ported from streamlit_dashboards position logic
+- Reconstructed locally from `positions` (starting inventory) + `trades` (transactional deltas)
 
 ### 3. Execution Principles
 - Codified trading rules
@@ -105,6 +105,33 @@ npm run dev -- -p 3001
 
 Personal DB schema in `docs/schema.sql`
 Arete connection is read-only (uses existing anon key).
+
+### Clarified portfolio architecture
+
+- `positions` = starting positions / opening inventory seed
+- `trades` = transactional changes after the seed date
+- `/api/portfolio/positions` = reconstructed current holdings from both tables
+- `/api/portfolio/closed` = reconstructed historical closed cycles from both tables
+- `/api/portfolio/nav-history` = daily NAV, requires local `stock_ohlcv(symbol, date, close)` data
+
+Exact seed SQL template: `docs/sql/starting_positions_template.sql`
+
+### Trade ingestion scripts
+
+```bash
+cd backend
+
+# Transform IBKR export to normalized JSON
+python scripts/trade_ingestion.py ibkr /path/to/ibkr.csv --output /tmp/ibkr_trades.json
+
+# Transform the manual template format
+python scripts/trade_ingestion.py manual scripts/manual_trade_template.csv --output /tmp/manual_trades.json
+
+# Upload normalized trades to the personal Supabase DB
+python scripts/upload_trades.py /tmp/ibkr_trades.json
+```
+
+If the personal DB has not yet been migrated, apply `docs/migrations/2026-04-08_add_source_platform_to_trades.sql` first.
 
 ## Development Status
 

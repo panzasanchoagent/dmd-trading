@@ -23,6 +23,7 @@ class TradeResponse(BaseModel):
     quantity: Decimal
     price: Decimal
     quote_currency: str
+    source_platform: Optional[str] = None
     executed_at: datetime
     trade_type: Optional[str] = None
     strategy: Optional[str] = None

@@ -20,6 +20,7 @@ class TradeCreate(BaseModel):
     quantity: Decimal
     price: Decimal
     quote_currency: str = "USD"
+    source_platform: Optional[str] = None
     executed_at: datetime
     
     # Optional

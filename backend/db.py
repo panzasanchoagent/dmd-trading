@@ -147,13 +147,17 @@ class PersonalDB:
     # POSITIONS
     # ============================================
     
-    async def get_positions(self) -> list:
-        """Get all current positions."""
+    async def list_position_seeds(self) -> list:
+        """Get seeded starting positions from the local positions table."""
         result = self.client.table("positions").select("*")\
             .gt("quantity", 0)\
-            .order("current_value", desc=True)\
+            .order("asset")\
             .execute()
         return result.data or []
+
+    async def get_positions(self) -> list:
+        """Backward-compatible alias for seeded positions."""
+        return await self.list_position_seeds()
     
     async def get_position(self, asset: str) -> Optional[dict]:
         """Get a single position by asset."""
@@ -193,6 +197,25 @@ class PersonalDB:
         if not result.data:
             raise DatabaseError("Failed to create closed position")
         return result.data[0]
+
+    async def get_stock_price_history(self, assets: list[str], days: int = 90) -> list:
+        """Get local daily close history from stock_ohlcv when available."""
+        from datetime import datetime, timedelta
+
+        if not assets:
+            return []
+
+        start_date = (datetime.utcnow() - timedelta(days=days)).date().isoformat()
+        try:
+            result = self.client.table("stock_ohlcv").select("symbol, date, close")\
+                .in_("symbol", [asset.upper() for asset in assets])\
+                .gte("date", start_date)\
+                .order("date")\
+                .execute()
+            return result.data or []
+        except Exception as exc:
+            logger.warning("stock_ohlcv unavailable in personal DB: %s", exc)
+            return []
     
     # ============================================
     # JOURNAL
