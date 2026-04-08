@@ -1,28 +1,24 @@
 /** @type {import('next').NextConfig} */
-function resolveApiUrl() {
+function resolveApiBase() {
   const configuredUrl = process.env.API_URL || process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8001';
 
   try {
     const url = new URL(configuredUrl);
-    const isTailscaleHost = /^100\./.test(url.hostname);
-
-    if (isTailscaleHost && url.port === '8001') {
-      return 'http://127.0.0.1:8001';
-    }
-
-    return url.origin;
+    const normalizedPath = url.pathname.replace(/\/$/, '');
+    const basePath = normalizedPath.endsWith('/api') ? normalizedPath : `${normalizedPath}/api`;
+    return `${url.origin}${basePath}`;
   } catch {
-    return 'http://127.0.0.1:8001';
+    return 'http://127.0.0.1:8001/api';
   }
 }
 
 const nextConfig = {
   async rewrites() {
-    const apiUrl = resolveApiUrl();
+    const apiBase = resolveApiBase();
     return [
       {
         source: '/api/:path*',
-        destination: `${apiUrl}/api/:path*`,
+        destination: `${apiBase}/:path*`,
       },
     ];
   },
