@@ -13,6 +13,8 @@ import logging
 
 from supabase import create_client, Client
 
+from config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -48,10 +50,10 @@ class PersonalDB:
     @property
     def client(self) -> Client:
         if self._client is None:
-            url = os.getenv("PERSONAL_SUPABASE_URL", "")
-            key = os.getenv("PERSONAL_SUPABASE_KEY", "")
+            url = os.getenv("PERSONAL_SUPABASE_URL", "") or settings.personal_supabase_url
+            key = os.getenv("PERSONAL_SUPABASE_KEY", "") or settings.personal_supabase_key
             
-            # Try keychain if env vars not set
+            # Try keychain if env vars/settings not set
             if not url or not key:
                 url = url or get_keychain_password("supabase-trading-journal", "url") or ""
                 key = key or get_keychain_password("supabase-trading-journal-anon", "trading-journal") or ""
@@ -457,10 +459,10 @@ class AreteDB:
     @property
     def client(self) -> Client:
         if self._client is None:
-            url = os.getenv("ARETE_SUPABASE_URL", "https://goptgqfllyutklnyjvoj.supabase.co")
-            key = os.getenv("ARETE_SUPABASE_KEY", "")
+            url = os.getenv("ARETE_SUPABASE_URL", "") or settings.arete_supabase_url or "https://goptgqfllyutklnyjvoj.supabase.co"
+            key = os.getenv("ARETE_SUPABASE_KEY", "") or settings.arete_supabase_key
             
-            # Try keychain if env var not set
+            # Try keychain if env var/settings not set
             if not key:
                 key = get_keychain_password("supabase-arete-anon", "arete") or ""
             
