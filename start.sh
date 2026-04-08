@@ -25,6 +25,8 @@ NC='\033[0m' # No Color
 # PID files
 BACKEND_PID_FILE="$SCRIPT_DIR/.backend.pid"
 FRONTEND_PID_FILE="$SCRIPT_DIR/.frontend.pid"
+BACKEND_LOG_FILE="$SCRIPT_DIR/.backend.log"
+FRONTEND_LOG_FILE="$SCRIPT_DIR/.frontend.log"
 
 log_info() {
     echo -e "${GREEN}[Trigger]${NC} $1"
@@ -38,26 +40,65 @@ log_error() {
     echo -e "${RED}[Trigger]${NC} $1"
 }
 
+wait_for_url() {
+    local url="$1"
+    local label="$2"
+    local attempts="${3:-20}"
+
+    for _ in $(seq 1 "$attempts"); do
+        if curl -fsS "$url" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+
+    log_error "$label did not become ready: $url"
+    return 1
+}
+
+resolve_backend_venv() {
+    if [ -x "$BACKEND_DIR/venv/bin/python" ]; then
+        echo "$BACKEND_DIR/venv"
+        return 0
+    fi
+
+    if [ -x "$SCRIPT_DIR/venv/bin/python" ]; then
+        echo "$SCRIPT_DIR/venv"
+        return 0
+    fi
+
+    echo "$BACKEND_DIR/venv"
+}
+
 start_backend() {
     log_info "Starting backend (FastAPI on port 8001)..."
-    
+
     cd "$BACKEND_DIR"
-    
+
+    local venv_dir
+    venv_dir="$(resolve_backend_venv)"
+
     # Check/create venv
-    if [ ! -d "venv" ]; then
-        log_warn "Virtual environment not found. Creating..."
-        python3 -m venv venv
-        source venv/bin/activate
+    if [ ! -d "$venv_dir" ]; then
+        log_warn "Virtual environment not found. Creating at $venv_dir ..."
+        python3 -m venv "$venv_dir"
+        source "$venv_dir/bin/activate"
         pip install -r requirements.txt
     else
-        source venv/bin/activate
+        source "$venv_dir/bin/activate"
     fi
-    
+
     # Start uvicorn in background, bind to all interfaces for Tailscale access
-    uvicorn main:app --host 0.0.0.0 --port 8001 --reload &
+    uvicorn main:app --host 0.0.0.0 --port 8001 --reload > "$BACKEND_LOG_FILE" 2>&1 &
     echo $! > "$BACKEND_PID_FILE"
-    
-    log_info "Backend started (PID: $(cat $BACKEND_PID_FILE))"
+
+    if ! wait_for_url "http://127.0.0.1:8001/health" "Backend"; then
+        log_error "Backend failed to boot. Last backend log lines:"
+        tail -n 40 "$BACKEND_LOG_FILE" 2>/dev/null || true
+        exit 1
+    fi
+
+    log_info "Backend started (PID: $(cat "$BACKEND_PID_FILE"))"
     log_info "  → Local:     http://localhost:8001"
     log_info "  → Tailscale: http://<mac-mini-tailscale-ip>:8001"
     log_info "  → Docs:      http://localhost:8001/docs"
@@ -65,20 +106,26 @@ start_backend() {
 
 start_frontend() {
     log_info "Starting frontend (Next.js on port 3001)..."
-    
+
     cd "$FRONTEND_DIR"
-    
+
     # Check node_modules
     if [ ! -d "node_modules" ]; then
         log_warn "node_modules not found. Running npm install..."
         npm install
     fi
-    
+
     # Start Next.js in background
-    npm run dev &
+    npm run dev > "$FRONTEND_LOG_FILE" 2>&1 &
     echo $! > "$FRONTEND_PID_FILE"
-    
-    log_info "Frontend started (PID: $(cat $FRONTEND_PID_FILE))"
+
+    if ! wait_for_url "http://127.0.0.1:3001" "Frontend"; then
+        log_error "Frontend failed to boot. Last frontend log lines:"
+        tail -n 40 "$FRONTEND_LOG_FILE" 2>/dev/null || true
+        exit 1
+    fi
+
+    log_info "Frontend started (PID: $(cat "$FRONTEND_PID_FILE"))"
     log_info "  → Local:     http://localhost:3001"
 }
 

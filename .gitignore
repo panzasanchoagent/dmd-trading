@@ -12,6 +12,8 @@ venv/
 .next/
 dist/
 build/
+*.log
+*.pid
 
 # IDE
 .idea/
