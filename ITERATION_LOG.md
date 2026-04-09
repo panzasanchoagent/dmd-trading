@@ -136,3 +136,35 @@
 
 ### Time Spent
 - ~20 minutes
+
+---
+
+## Loop 5 — Remote frontend proxy regression hotfix
+
+### Changes Made
+- Diffed the recent Trigger commits on `trigger-isolated-portfolio-wiring` and traced the regression to `fix: honor explicit frontend api base`.
+- Reintroduced the server-side guardrail that rewrites stale `NEXT_PUBLIC_API_URL=http://100.x.x.x:8001` values back to `127.0.0.1:8001` for the colocated Mac mini frontend/backend setup.
+- Kept explicit `API_URL` overrides authoritative, so genuine remote backend routing still works when intentionally configured.
+- Updated the frontend env example to document the distinction.
+
+### Test Results
+- Local backend health + proxied `/api/portfolio/summary` via frontend with default config: ✅
+- Frontend rewrite resolution with fallback `NEXT_PUBLIC_API_URL` set to a Tailscale `100.x.x.x:8001` host: ✅ now normalizes to localhost instead of trusting the stale host.
+- Frontend rewrite resolution with explicit `API_URL` set to a remote host: ✅ still preserved.
+- Main frontend tabs (`/`, `/portfolio`, `/trades`) over the running app: ✅ return HTTP 200.
+
+### Bugs Found
+1. Commit `4a104c7` removed the Tailscale-host safety check and started trusting fallback `NEXT_PUBLIC_API_URL` values again.
+2. On the live Windows -> Mac mini setup, that meant the Next.js server proxy could target an old `100.x.x.x:8001` backend address and throw `connect ECONNREFUSED`, breaking every tab that loads via `/api/*`.
+
+### Fixes Applied
+- Added source-aware API base normalization in `frontend/next.config.js`.
+- Only explicit `API_URL` now bypasses localhost normalization.
+
+### Verification
+- Default colocated setup proxies to local FastAPI again.
+- Intentional remote backend routing remains available through `API_URL`.
+- The regression path is closed without undoing the newer explicit-override behavior.
+
+### Time Spent
+- ~20 minutes
