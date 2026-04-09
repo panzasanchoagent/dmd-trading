@@ -98,8 +98,16 @@ uvicorn main:app --port 8001 --reload
 # Frontend
 cd frontend
 npm install
-npm run dev -- -p 3001
+npm run dev
 ```
+
+### Windows + OneDrive note
+
+If you open this repo from a OneDrive-synced Windows path, Next.js can crash during startup with `EINVAL ... readlink ... frontend\\.next\\...` on generated files like `interception-route-rewrite-manifest.js`.
+
+The project now auto-cleans `frontend/.next` before `npm run dev`, `npm run build`, or `npm run start` when it detects `Windows + OneDrive`, which clears the immediate stale-artifact failure mode.
+
+That is only a guardrail. The durable fix is to keep the working repo outside OneDrive sync, or mark the whole project as fully local and exclude `.next`/`node_modules` from sync if possible.
 
 ## Database
 
