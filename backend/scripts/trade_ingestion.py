@@ -70,7 +70,17 @@ def parse_ibkr_datetime(value: str) -> datetime:
 
 
 def parse_manual_datetime(value: str) -> datetime:
-    return datetime.strptime(value, "%d/%m/%Y %H:%M").replace(tzinfo=timezone.utc)
+    text = value.strip()
+    formats = (
+        "%d/%m/%Y %H:%M",
+        "%d/%m/%Y",
+    )
+    for fmt in formats:
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    raise ValueError(f"Unsupported manual datetime format: {value}")
 
 
 def parse_hyperliquid_datetime(value: str) -> datetime:

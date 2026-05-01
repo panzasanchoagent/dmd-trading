@@ -9,7 +9,13 @@ sys.modules.setdefault('db', types.SimpleNamespace(PersonalDB=object))
 
 sys.path.insert(0, '/Users/dmd/dmd-trading/backend')
 
-from scripts.trade_ingestion import hyperliquid_trade_to_normalized, transform_hyperliquid
+from scripts.trade_ingestion import (
+    hyperliquid_trade_to_normalized,
+    manual_trade_to_normalized,
+    parse_manual_datetime,
+    transform_hyperliquid,
+    transform_manual,
+)
 
 
 class HyperliquidIngestionTests(unittest.TestCase):
@@ -98,6 +104,48 @@ class HyperliquidIngestionTests(unittest.TestCase):
         self.assertEqual(normalized[0]['executed_at'], '2026-01-14T04:46:00+00:00')
         self.assertEqual(normalized[1]['side'], 'SELL')
         self.assertIn('has_closed_pnl', normalized[1]['tags'])
+
+
+class ManualIngestionTests(unittest.TestCase):
+    def test_parse_manual_datetime_accepts_date_only(self):
+        parsed = parse_manual_datetime('10/01/2026')
+
+        self.assertEqual(parsed.isoformat(), '2026-01-10T00:00:00+00:00')
+
+    def test_manual_trade_normalizes_date_only_timestamp(self):
+        row = {
+            'ID': '10004',
+            'Symbol': 'ETH_USDT',
+            'Ask / Bid': 'Ask',
+            'From Amount': '1000',
+            'From Coin': 'USDT',
+            'DONE timestamp UTC': '10/01/2026',
+            'Quote Price': '2500',
+            'To Amount': '0.4',
+            'To Coin': 'ETH',
+            'settlement_status': 'SETTLED',
+        }
+
+        normalized = manual_trade_to_normalized(row)
+
+        self.assertEqual(normalized['executed_at'], '2026-01-10T00:00:00+00:00')
+        self.assertEqual(normalized['side'], 'BUY')
+        self.assertEqual(normalized['asset'], 'ETH')
+
+    def test_transform_manual_reads_date_only_rows_end_to_end(self):
+        csv_content = """ID,Symbol,Ask / Bid,From Amount,From Coin,DONE timestamp UTC,Quote Price,To Amount,To Coin,settlement_status
+10004,ETH_USDT,Ask,1000,USDT,10/01/2026,2500,0.4,ETH,SETTLED
+
+"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / 'manual.csv'
+            path.write_text(csv_content, encoding='utf-8')
+
+            normalized = transform_manual(path)
+
+        self.assertEqual(len(normalized), 1)
+        self.assertEqual(normalized[0]['executed_at'], '2026-01-10T00:00:00+00:00')
+        self.assertEqual(normalized[0]['asset'], 'ETH')
 
 
 if __name__ == '__main__':
