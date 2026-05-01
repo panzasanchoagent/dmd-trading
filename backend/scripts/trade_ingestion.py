@@ -76,6 +76,8 @@ def parse_manual_datetime(value: str) -> datetime:
 def parse_hyperliquid_datetime(value: str) -> datetime:
     text = value.strip()
     candidates = [text]
+    if " - " in text:
+        candidates.append(text.replace(" - ", " "))
     if text.endswith("Z"):
         candidates.append(text[:-1] + "+00:00")
     for candidate in candidates:
@@ -86,11 +88,22 @@ def parse_hyperliquid_datetime(value: str) -> datetime:
             return parsed.astimezone(timezone.utc)
         except ValueError:
             continue
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M"):
-        try:
-            return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
+    formats = (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%m/%d/%Y %H:%M:%S",
+        "%m/%d/%Y %H:%M",
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+        "%d/%m/%Y - %H:%M:%S",
+        "%d/%m/%Y - %H:%M",
+    )
+    for candidate in candidates:
+        for fmt in formats:
+            try:
+                return datetime.strptime(candidate, fmt).replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
     raise ValueError(f"Unsupported Hyperliquid time format: {value!r}")
 
 
@@ -318,16 +331,18 @@ HYPERLIQUID_DIRECTION_MAP = {
 
 
 def hyperliquid_trade_to_normalized(row: dict[str, str]) -> dict[str, Any]:
-    asset = clean_symbol((row.get("coin") or "").strip())
-    raw_direction = (row.get("dir") or "").strip()
+    normalized_row = {(key or "").strip(): value for key, value in row.items()}
+
+    asset = clean_symbol((normalized_row.get("coin") or "").strip())
+    raw_direction = (normalized_row.get("dir") or "").strip()
     direction_key = raw_direction.upper()
     normalized_direction = HYPERLIQUID_DIRECTION_MAP.get(direction_key)
-    price = parse_decimal(row.get("px"))
-    size = parse_decimal(row.get("sz"))
-    notional = parse_decimal(row.get("ntl"))
-    fee = parse_decimal(row.get("fee"))
-    closed_pnl = parse_decimal(row.get("closedPnl"))
-    executed_at_raw = (row.get("time") or "").strip()
+    price = parse_decimal(normalized_row.get("px"))
+    size = parse_decimal(normalized_row.get("sz"))
+    notional = parse_decimal(normalized_row.get("ntl"))
+    fee = parse_decimal(normalized_row.get("fee"))
+    closed_pnl = parse_decimal(normalized_row.get("closedPnl"))
+    executed_at_raw = (normalized_row.get("time") or "").strip()
 
     if not asset or normalized_direction is None:
         raise ValueError(
@@ -367,14 +382,14 @@ def hyperliquid_trade_to_normalized(row: dict[str, str]) -> dict[str, Any]:
         "tags": tags,
         "metadata": {
             "source_trade": {
-                "coin": row.get("coin"),
-                "dir": row.get("dir"),
+                "coin": normalized_row.get("coin"),
+                "dir": normalized_row.get("dir"),
                 "normalized_side": side,
                 "trade_intent": trade_intent,
                 "notional": str(notional) if notional is not None else None,
                 "fee": str(fee) if fee is not None else None,
                 "closed_pnl": str(closed_pnl) if closed_pnl is not None else None,
-                "raw_time": row.get("time"),
+                "raw_time": normalized_row.get("time"),
             }
         },
     }

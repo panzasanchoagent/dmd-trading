@@ -168,3 +168,35 @@
 
 ### Time Spent
 - ~20 minutes
+
+---
+
+## Loop 6 — Hyperliquid CSV parser real-export compatibility
+
+### Changes Made
+- Patched Hyperliquid timestamp parsing to accept the actual export format (`DD/MM/YYYY - HH:MM:SS`) in addition to the prior ISO/US-style inputs.
+- Hardened Hyperliquid row handling by normalizing CSV header keys before reading fields, so the parser is less brittle to export/header whitespace quirks.
+- Added focused tests for the real timestamp shape and an end-to-end sample CSV using `time,coin,dir,px,sz,ntl,fee,closedPnl` with `Open Long` / `Close Long` directions.
+
+### Test Results
+- Focused Hyperliquid unit test suite (`./venv/bin/python -m unittest backend/test_trade_ingestion.py`): ✅
+- End-to-end sample transform through `transform_hyperliquid(...)` + JSON output write: ✅
+- Direct CLI invocation of `backend/scripts/trade_ingestion.py`: ⚠️ blocked in this checkout because the checked-in venv is missing runtime deps like `python-dotenv`
+
+### Bugs Found
+1. Hyperliquid datetime parsing did not support the real export format `14/01/2026 - 04:46:00`.
+2. Parser verification had only covered synthetic ISO-like timestamps, not the actual CSV shape David exported.
+3. The repo-local CLI environment is missing optional runtime dependencies, so full script invocation cannot be validated without installing/repairing deps.
+
+### Fixes Applied
+- Added day-first and ` - ` separated Hyperliquid datetime formats.
+- Added tests for real export rows and multi-row CSV ingestion.
+- Verified normalized output preserves expected side mapping, timestamps, tags, and metadata.
+
+### Verification
+- Sample rows now normalize to UTC timestamps like `2026-01-14T04:46:00+00:00`.
+- `Open Long` maps to `BUY` and `Close Long` maps to `SELL` end-to-end.
+- Closed-PnL rows still emit `has_closed_pnl` and retain raw source metadata.
+
+### Time Spent
+- ~15 minutes
