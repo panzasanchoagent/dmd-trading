@@ -17,6 +17,7 @@ CREATE TABLE trades (
     price DECIMAL(20, 8) NOT NULL,
     quote_currency VARCHAR(10) DEFAULT 'USD',
     source_platform VARCHAR(50),             -- ibkr, manual, etc.
+    category VARCHAR(50),                    -- TradFi, Crypto - Hyperliquid, Crypto - Spot
     
     -- Timing
     executed_at TIMESTAMPTZ NOT NULL,

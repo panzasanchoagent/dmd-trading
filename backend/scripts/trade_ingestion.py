@@ -3,6 +3,7 @@
 
 Supports:
 - IBKR activity exports with auto-FX rows
+- Hyperliquid fills CSV exports
 - Manual CSV template based on David's YTD trade log format
 
 The normalized output shape targets the personal `trades` table and adds
@@ -33,6 +34,7 @@ from db import PersonalDB
 USD = "USD"
 EIGHT_DP = Decimal("0.00000001")
 FOUR_DP = Decimal("0.0001")
+ALLOWED_TRADE_CATEGORIES = {"TradFi", "Crypto - Hyperliquid", "Crypto - Spot"}
 
 
 @dataclass
@@ -69,6 +71,36 @@ def parse_ibkr_datetime(value: str) -> datetime:
 
 def parse_manual_datetime(value: str) -> datetime:
     return datetime.strptime(value, "%d/%m/%Y %H:%M").replace(tzinfo=timezone.utc)
+
+
+def parse_hyperliquid_datetime(value: str) -> datetime:
+    text = value.strip()
+    candidates = [text]
+    if text.endswith("Z"):
+        candidates.append(text[:-1] + "+00:00")
+    for candidate in candidates:
+        try:
+            parsed = datetime.fromisoformat(candidate)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except ValueError:
+            continue
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M"):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    raise ValueError(f"Unsupported Hyperliquid time format: {value!r}")
+
+
+def normalize_trade_category(category: str) -> str:
+    normalized = category.strip()
+    if normalized not in ALLOWED_TRADE_CATEGORIES:
+        raise ValueError(
+            f"Unsupported trade category {category!r}. Allowed categories: {sorted(ALLOWED_TRADE_CATEGORIES)}"
+        )
+    return normalized
 
 
 def clean_symbol(symbol: str) -> str:
@@ -239,6 +271,7 @@ def ibkr_trade_to_normalized(row: dict[str, str], fx_quotes: list[FxQuote]) -> d
         "quantity": float(quantize_decimal(quantity_abs)),
         "price": float(quantize_decimal(price_usd)),
         "quote_currency": USD,
+        "category": normalize_trade_category("TradFi"),
         "executed_at": executed_at.isoformat(),
         "source_platform": "ibkr",
         "entry_rationale": " | ".join(notes),
@@ -271,6 +304,71 @@ def transform_ibkr(path: Path) -> list[dict[str, Any]]:
         if row.get("Asset Category") != "Stocks":
             continue
         normalized.append(ibkr_trade_to_normalized(row, fx_quotes))
+    return normalized
+
+
+def hyperliquid_trade_to_normalized(row: dict[str, str]) -> dict[str, Any]:
+    asset = clean_symbol((row.get("coin") or "").strip())
+    direction = (row.get("dir") or "").strip().upper()
+    price = parse_decimal(row.get("px"))
+    size = parse_decimal(row.get("sz"))
+    notional = parse_decimal(row.get("ntl"))
+    fee = parse_decimal(row.get("fee"))
+    closed_pnl = parse_decimal(row.get("closedPnl"))
+    executed_at_raw = (row.get("time") or "").strip()
+
+    if not asset or direction not in {"BUY", "SELL"}:
+        raise ValueError(f"Invalid Hyperliquid row, expected coin and dir BUY/SELL: {row}")
+    if price is None or size is None or executed_at_raw == "":
+        raise ValueError(f"Missing price, size, or time in Hyperliquid row: {row}")
+
+    quantity = abs(size)
+    executed_at = parse_hyperliquid_datetime(executed_at_raw)
+
+    notes = [
+        "Imported from Hyperliquid fills CSV",
+        f"Notional: {notional if notional is not None else 'N/A'} USDC",
+        f"Fee: {fee if fee is not None else '0'} USDC",
+    ]
+    if closed_pnl is not None:
+        notes.append(f"Closed PnL: {closed_pnl} USDC")
+
+    tags = ["imported", "hyperliquid", "category:crypto-hyperliquid"]
+    if closed_pnl is not None:
+        tags.append("has_closed_pnl")
+
+    return {
+        "asset": asset,
+        "side": direction,
+        "quantity": float(quantize_decimal(quantity)),
+        "price": float(quantize_decimal(price)),
+        "quote_currency": "USDC",
+        "category": normalize_trade_category("Crypto - Hyperliquid"),
+        "executed_at": executed_at.isoformat(),
+        "source_platform": "hyperliquid",
+        "entry_rationale": " | ".join(notes),
+        "tags": tags,
+        "metadata": {
+            "source_trade": {
+                "coin": row.get("coin"),
+                "dir": row.get("dir"),
+                "notional": str(notional) if notional is not None else None,
+                "fee": str(fee) if fee is not None else None,
+                "closed_pnl": str(closed_pnl) if closed_pnl is not None else None,
+                "raw_time": row.get("time"),
+            }
+        },
+    }
+
+
+def transform_hyperliquid(path: Path) -> list[dict[str, Any]]:
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        rows = list(csv.DictReader(handle))
+    normalized: list[dict[str, Any]] = []
+    for row in rows:
+        if not any((value or "").strip() for value in row.values()):
+            continue
+        normalized.append(hyperliquid_trade_to_normalized(row))
     return normalized
 
 
@@ -317,6 +415,7 @@ def manual_trade_to_normalized(row: dict[str, str]) -> dict[str, Any]:
         "quantity": float(quantize_decimal(abs(quantity))),
         "price": float(quantize_decimal(quote_price)),
         "quote_currency": quote_ccy,
+        "category": normalize_trade_category("Crypto - Spot"),
         "executed_at": parse_manual_datetime(row["DONE timestamp UTC"]).isoformat(),
         "source_platform": "manual",
         "entry_rationale": " | ".join(notes),
@@ -367,6 +466,7 @@ def csv_ready(records: list[dict[str, Any]]) -> tuple[list[str], list[dict[str, 
         "quantity",
         "price",
         "quote_currency",
+        "category",
         "executed_at",
         "source_platform",
         "entry_rationale",
@@ -395,10 +495,16 @@ def write_output(records: list[dict[str, Any]], output_path: Path) -> None:
         writer.writerows(rows)
 
 
-def strip_metadata_for_upload(record: dict[str, Any], include_source_platform: bool = True) -> dict[str, Any]:
+def strip_metadata_for_upload(
+    record: dict[str, Any],
+    include_source_platform: bool = True,
+    include_category: bool = True,
+) -> dict[str, Any]:
     payload = {k: v for k, v in record.items() if k != "metadata"}
     if not include_source_platform:
         payload.pop("source_platform", None)
+    if not include_category:
+        payload.pop("category", None)
     return payload
 
 
@@ -415,15 +521,16 @@ def table_has_column(db: PersonalDB, table_name: str, column_name: str) -> bool:
 async def upload_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     db = PersonalDB()
     include_source_platform = table_has_column(db, "trades", "source_platform")
+    include_category = table_has_column(db, "trades", "category")
     uploaded = []
     for record in records:
-        uploaded.append(await db.create_trade(strip_metadata_for_upload(record, include_source_platform=include_source_platform)))
+        uploaded.append(await db.create_trade(strip_metadata_for_upload(record, include_source_platform=include_source_platform, include_category=include_category)))
     return uploaded
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["ibkr", "manual"], help="Input format to transform")
+    parser.add_argument("mode", choices=["ibkr", "hyperliquid", "manual"], help="Input format to transform")
     parser.add_argument("input", type=Path, help="Source CSV path")
     parser.add_argument("--output", type=Path, help="Write normalized records to CSV or JSON")
     parser.add_argument("--upload", action="store_true", help="Upload normalized records to personal Supabase")
@@ -436,6 +543,8 @@ def main() -> int:
 
     if args.mode == "ibkr":
         records = transform_ibkr(args.input)
+    elif args.mode == "hyperliquid":
+        records = transform_hyperliquid(args.input)
     else:
         records = transform_manual(args.input)
 

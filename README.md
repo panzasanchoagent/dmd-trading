@@ -132,14 +132,19 @@ cd backend
 # Transform IBKR export to normalized JSON
 python scripts/trade_ingestion.py ibkr /path/to/ibkr.csv --output /tmp/ibkr_trades.json
 
+# Transform Hyperliquid fills CSV
+python scripts/trade_ingestion.py hyperliquid /path/to/hyperliquid_fills.csv --output /tmp/hyperliquid_trades.json
+
 # Transform the manual template format
 python scripts/trade_ingestion.py manual scripts/manual_trade_template.csv --output /tmp/manual_trades.json
 
 # Upload normalized trades to the personal Supabase DB
 python scripts/upload_trades.py /tmp/ibkr_trades.json
+python scripts/upload_trades.py /tmp/hyperliquid_trades.json
+python scripts/upload_trades.py /tmp/manual_trades.json
 ```
 
-If the personal DB has not yet been migrated, apply `docs/migrations/2026-04-08_add_source_platform_to_trades.sql` first.
+If the personal DB has not yet been migrated, apply `docs/migrations/2026-04-08_add_source_platform_to_trades.sql` and `docs/migrations/2026-05-01_add_trade_category.sql` first. Imported trade categories are now constrained to `TradFi`, `Crypto - Hyperliquid`, and `Crypto - Spot`.
 
 ## Development Status
 

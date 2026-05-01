@@ -40,12 +40,15 @@ def load_records(path: Path) -> list[dict[str, Any]]:
 async def upload(path: Path) -> int:
     db = PersonalDB()
     include_source_platform = table_has_column(db, "trades", "source_platform")
+    include_category = table_has_column(db, "trades", "category")
     records = load_records(path)
     count = 0
     for record in records:
         payload = {k: v for k, v in record.items() if k not in {"metadata"}}
         if not include_source_platform:
             payload.pop("source_platform", None)
+        if not include_category:
+            payload.pop("category", None)
         await db.create_trade(payload)
         count += 1
     return count
