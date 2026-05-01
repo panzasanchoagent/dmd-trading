@@ -13,7 +13,8 @@ Personal trading execution system with AI coaching.
 │  • theses           │     │  • journal_entries  │
 │  • research_items   │     │  • principles       │
 │  • tweets           │     │  • post_mortems     │
-│  • cmc_asset_data   │     │  • patterns         │
+│  • cmc_asset_data   │
+│  • stock_ohlcv      │     │  • patterns         │
 │  • predictions      │     │  • checklists       │
 └──────────┬──────────┘     └──────────┬──────────┘
            │                           │
@@ -120,7 +121,7 @@ Arete connection is read-only (uses existing anon key).
 - `trades` = transactional changes after the seed date
 - `/api/portfolio/positions` = reconstructed current holdings from both tables
 - `/api/portfolio/closed` = reconstructed historical closed cycles from both tables
-- `/api/portfolio/nav-history` = daily NAV, requires local `stock_ohlcv(symbol, date, close)` data
+- `/api/portfolio/nav-history` = daily NAV, priced from Arete `stock_ohlcv(symbol, date, close)` plus `cmc_asset_data` for crypto
 
 Exact seed SQL template: `docs/sql/starting_positions_template.sql`
 

@@ -1,10 +1,11 @@
 """
 Portfolio reconstruction helpers.
 
-Keeps dmd-trading usable in isolation by rebuilding portfolio state from the
-local database only:
+Rebuilds portfolio state from the personal trading database while sourcing
+market prices from Arete:
 - `positions` are treated as seeded starting positions
 - `trades` are treated as transactional deltas after those starting positions
+- market prices come from Arete `stock_ohlcv` and `cmc_asset_data`
 
 This mirrors the clarified LiquidPortfolioJobs-style architecture without
 referencing another repo at runtime.
@@ -36,6 +37,7 @@ class PortfolioDataGap(Exception):
 @dataclass
 class ClosedCycle:
     asset: str
+    direction: str
     entry_date: Optional[str] = None
     avg_entry_price: Decimal = ZERO
     total_bought: Decimal = ZERO
@@ -113,18 +115,21 @@ def _infer_position_type(record: dict) -> str | None:
     return explicit_type or POSITION_TYPE_BY_TIMEFRAME.get(timeframe) or "unclassified"
 
 
-def _ensure_cycle(ledger: AssetLedger) -> ClosedCycle:
-    if ledger.active_cycle is None:
-        ledger.active_cycle = ClosedCycle(asset=ledger.asset)
+def _cycle_direction_for_ledger(ledger: AssetLedger) -> str | None:
+    if ledger.quantity > ZERO:
+        return "long"
+    if ledger.quantity < ZERO:
+        return "short"
+    return None
+
+
+def _ensure_cycle(ledger: AssetLedger, direction: str) -> ClosedCycle:
+    if ledger.active_cycle is None or ledger.active_cycle.direction != direction:
+        ledger.active_cycle = ClosedCycle(asset=ledger.asset, direction=direction)
     return ledger.active_cycle
 
 
-def _apply_buy(ledger: AssetLedger, quantity: Decimal, price: Decimal, executed_at: Optional[str], record: dict) -> None:
-    if quantity <= ZERO or price <= ZERO:
-        return
-
-    ledger.quantity += quantity
-    ledger.total_cost_basis += quantity * price
+def _touch_ledger(ledger: AssetLedger, executed_at: Optional[str], record: dict) -> None:
     ledger.first_entry_date = ledger.first_entry_date or executed_at
     ledger.last_trade_date = executed_at or ledger.last_trade_date
     ledger.number_of_trades += 1
@@ -132,7 +137,27 @@ def _apply_buy(ledger: AssetLedger, quantity: Decimal, price: Decimal, executed_
     if record.get("target_allocation_pct") is not None:
         ledger.target_allocation_pct = _to_decimal(record.get("target_allocation_pct"))
 
-    cycle = _ensure_cycle(ledger)
+
+def _open_long(ledger: AssetLedger, quantity: Decimal, price: Decimal, executed_at: Optional[str], record: dict) -> None:
+    ledger.quantity += quantity
+    ledger.total_cost_basis += quantity * price
+    _touch_ledger(ledger, executed_at, record)
+
+    cycle = _ensure_cycle(ledger, "long")
+    cycle.entry_date = cycle.entry_date or executed_at
+    cycle.entry_cost_basis += quantity * price
+    cycle.total_bought += quantity
+    cycle.avg_entry_price = (cycle.entry_cost_basis / cycle.total_bought) if cycle.total_bought > ZERO else ZERO
+    cycle.number_of_trades += 1
+    cycle.strategy = cycle.strategy or record.get("strategy")
+
+
+def _open_short(ledger: AssetLedger, quantity: Decimal, price: Decimal, executed_at: Optional[str], record: dict) -> None:
+    ledger.quantity -= quantity
+    ledger.total_cost_basis -= quantity * price
+    _touch_ledger(ledger, executed_at, record)
+
+    cycle = _ensure_cycle(ledger, "short")
     cycle.entry_date = cycle.entry_date or executed_at
     cycle.entry_cost_basis += quantity * price
     cycle.total_bought += quantity
@@ -144,7 +169,6 @@ def _apply_buy(ledger: AssetLedger, quantity: Decimal, price: Decimal, executed_
 def _finalize_cycle(ledger: AssetLedger, executed_at: Optional[str]) -> None:
     cycle = ledger.active_cycle
     if not cycle or cycle.total_sold <= ZERO:
-        ledger.active_cycle = None if ledger.quantity <= ZERO else cycle
         return
 
     cycle.exit_date = executed_at or cycle.exit_date
@@ -169,9 +193,9 @@ def _finalize_cycle(ledger: AssetLedger, executed_at: Optional[str]) -> None:
     ledger.active_cycle = None
 
 
-def _apply_sell(ledger: AssetLedger, quantity: Decimal, price: Decimal, executed_at: Optional[str], record: dict) -> None:
-    if quantity <= ZERO or price <= ZERO or ledger.quantity <= ZERO:
-        return
+def _close_long(ledger: AssetLedger, quantity: Decimal, price: Decimal, executed_at: Optional[str], record: dict) -> Decimal:
+    if quantity <= ZERO or ledger.quantity <= ZERO:
+        return ZERO
 
     sell_qty = min(quantity, ledger.quantity)
     avg_cost = (ledger.total_cost_basis / ledger.quantity) if ledger.quantity > ZERO else ZERO
@@ -180,15 +204,12 @@ def _apply_sell(ledger: AssetLedger, quantity: Decimal, price: Decimal, executed
 
     ledger.quantity -= sell_qty
     ledger.total_cost_basis -= realized_cost
-    if ledger.quantity <= ZERO:
-        ledger.quantity = ZERO
+    if ledger.quantity == ZERO:
         ledger.total_cost_basis = ZERO
 
-    ledger.last_trade_date = executed_at or ledger.last_trade_date
-    ledger.number_of_trades += 1
-    ledger.position_type = ledger.position_type or _infer_position_type(record)
+    _touch_ledger(ledger, executed_at, record)
 
-    cycle = _ensure_cycle(ledger)
+    cycle = _ensure_cycle(ledger, "long")
     cycle.exit_date = executed_at or cycle.exit_date
     cycle.total_sold += sell_qty
     cycle.exit_proceeds += realized_proceeds
@@ -196,13 +217,68 @@ def _apply_sell(ledger: AssetLedger, quantity: Decimal, price: Decimal, executed
     cycle.number_of_trades += 1
     cycle.strategy = cycle.strategy or record.get("strategy")
 
-    if ledger.quantity <= ZERO:
+    if ledger.quantity == ZERO:
         _finalize_cycle(ledger, executed_at)
+
+    return sell_qty
+
+
+def _cover_short(ledger: AssetLedger, quantity: Decimal, price: Decimal, executed_at: Optional[str], record: dict) -> Decimal:
+    if quantity <= ZERO or ledger.quantity >= ZERO:
+        return ZERO
+
+    cover_qty = min(quantity, abs(ledger.quantity))
+    avg_entry_price = abs(ledger.total_cost_basis / ledger.quantity) if ledger.quantity < ZERO else ZERO
+    cover_cost = cover_qty * price
+    short_sale_proceeds = avg_entry_price * cover_qty
+
+    ledger.quantity += cover_qty
+    ledger.total_cost_basis += short_sale_proceeds
+    if ledger.quantity == ZERO:
+        ledger.total_cost_basis = ZERO
+
+    _touch_ledger(ledger, executed_at, record)
+
+    cycle = _ensure_cycle(ledger, "short")
+    cycle.exit_date = executed_at or cycle.exit_date
+    cycle.total_sold += cover_qty
+    cycle.exit_proceeds += cover_cost
+    cycle.realized_pnl += short_sale_proceeds - cover_cost
+    cycle.number_of_trades += 1
+    cycle.strategy = cycle.strategy or record.get("strategy")
+
+    if ledger.quantity == ZERO:
+        _finalize_cycle(ledger, executed_at)
+
+    return cover_qty
+
+
+def _apply_buy(ledger: AssetLedger, quantity: Decimal, price: Decimal, executed_at: Optional[str], record: dict) -> None:
+    if quantity <= ZERO or price <= ZERO:
+        return
+
+    remaining = quantity
+    if ledger.quantity < ZERO:
+        remaining -= _cover_short(ledger, remaining, price, executed_at, record)
+    if remaining > ZERO:
+        _open_long(ledger, remaining, price, executed_at, record)
+
+
+def _apply_sell(ledger: AssetLedger, quantity: Decimal, price: Decimal, executed_at: Optional[str], record: dict) -> None:
+    if quantity <= ZERO or price <= ZERO:
+        return
+
+    remaining = quantity
+    if ledger.quantity > ZERO:
+        remaining -= _close_long(ledger, remaining, price, executed_at, record)
+    if remaining > ZERO:
+        _open_short(ledger, remaining, price, executed_at, record)
 
 
 def _serialize_closed_cycle(cycle: ClosedCycle) -> dict:
     return {
         "asset": cycle.asset,
+        "direction": cycle.direction,
         "entry_date": cycle.entry_date,
         "avg_entry_price": _to_float(cycle.avg_entry_price),
         "total_bought": _to_float(cycle.total_bought),
@@ -263,7 +339,8 @@ def apply_price_fallbacks(positions: list[dict], live_prices: Optional[dict[str,
         if pos.get("total_cost_basis") is not None:
             cost_basis = float(pos.get("total_cost_basis") or 0)
             pos["unrealized_pnl"] = pos["current_value"] - cost_basis
-            pos["unrealized_pnl_pct"] = (pos["unrealized_pnl"] / cost_basis) * 100 if cost_basis else None
+            denominator = abs(cost_basis)
+            pos["unrealized_pnl_pct"] = (pos["unrealized_pnl"] / denominator) * 100 if denominator else None
 
     if total_value:
         for pos in positions:
@@ -298,14 +375,7 @@ async def get_latest_price_map(assets: list[str], trades: Optional[list[dict]] =
     arete_prices = await arete_db.get_current_prices(asset_list)
     for asset, payload in arete_prices.items():
         if payload.get("price") is not None:
-            combined[asset] = {**payload, "source": "arete_latest"}
-
-    missing_assets = [asset for asset in asset_list if asset not in combined and asset != "USD"]
-    if missing_assets:
-        local_stock_prices = await personal_db.get_latest_stock_prices(missing_assets)
-        for asset, payload in local_stock_prices.items():
-            if payload.get("price") is not None and asset not in combined:
-                combined[asset] = payload
+            combined[asset] = payload
 
     if trades is None:
         trades = await personal_db.get_all_trades_for_portfolio()
@@ -341,7 +411,7 @@ async def reconstruct_portfolio_state() -> PortfolioReconstruction:
         asset = (seed.get("asset") or "").upper().strip()
         quantity = _to_decimal(seed.get("quantity"))
         price = _to_decimal(seed.get("avg_entry_price"))
-        if not asset or quantity <= ZERO or price <= ZERO:
+        if not asset or quantity == ZERO or price <= ZERO:
             continue
 
         ledger = ledgers.setdefault(asset, AssetLedger(asset=asset))
@@ -351,7 +421,10 @@ async def reconstruct_portfolio_state() -> PortfolioReconstruction:
             "target_allocation_pct": seed.get("target_allocation_pct"),
         }
         executed_at = _to_iso(seed.get("first_entry_date") or seed.get("last_trade_date") or seed.get("updated_at"))
-        _apply_buy(ledger, quantity, price, executed_at, seed_record)
+        if quantity > ZERO:
+            _apply_buy(ledger, quantity, price, executed_at, seed_record)
+        else:
+            _apply_sell(ledger, abs(quantity), price, executed_at, seed_record)
         ledger.number_of_trades = max(ledger.number_of_trades, int(seed.get("number_of_trades") or 1))
 
     for trade in trades:
@@ -389,13 +462,14 @@ async def reconstruct_portfolio_state() -> PortfolioReconstruction:
         if ledger.quantity == ZERO:
             continue
 
-        avg_entry_price = (ledger.total_cost_basis / ledger.quantity) if ledger.quantity > ZERO else None
+        avg_entry_price = abs(ledger.total_cost_basis / ledger.quantity) if ledger.quantity != ZERO else None
         positions.append(
             {
                 "asset": ledger.asset,
                 "quantity": float(ledger.quantity),
                 "avg_entry_price": _to_float(avg_entry_price),
                 "total_cost_basis": _to_float(ledger.total_cost_basis),
+                "position_direction": _cycle_direction_for_ledger(ledger),
                 "first_entry_date": ledger.first_entry_date,
                 "last_trade_date": ledger.last_trade_date,
                 "number_of_trades": ledger.number_of_trades,
@@ -458,11 +532,27 @@ async def compute_daily_nav_history(days: int = 90) -> tuple[list[dict], str]:
     asset_universe = [asset for asset in asset_universe if asset]
 
     assets = [asset for asset in asset_universe if asset != "USD"]
-    price_history = await personal_db.get_stock_price_history(assets=assets, days=days)
-    if not price_history and "USD" not in asset_universe:
+    stock_history = await arete_db.get_stock_price_history(assets=assets, days=days)
+    stock_symbols = {(row.get("symbol") or "").upper() for row in stock_history}
+    crypto_symbols = [asset for asset in assets if asset not in stock_symbols]
+
+    price_history = list(stock_history)
+    for asset in crypto_symbols:
+        history_rows = await arete_db.get_price_history(asset, days=days)
+        price_history.extend(
+            {
+                "symbol": asset,
+                "date": row.get("date"),
+                "close": row.get("price"),
+            }
+            for row in history_rows
+            if row.get("price") is not None
+        )
+
+    if not price_history and assets:
         raise PortfolioDataGap(
-            "No local stock_ohlcv price history is available. "
-            "Create/populate public.stock_ohlcv with symbol, date, close columns to enable daily NAV."
+            "No Arete market price history is available for the current asset universe. "
+            "Populate Arete stock_ohlcv and/or cmc_asset_data to enable daily NAV."
         )
 
     today = date.today()
@@ -477,7 +567,7 @@ async def compute_daily_nav_history(days: int = 90) -> tuple[list[dict], str]:
         if symbol and row_date and close is not None:
             by_symbol[symbol][row_date] = _to_decimal(close)
 
-    fallback_prices: dict[str, Decimal] = {}
+    fallback_prices: dict[str, Decimal] = {"USD": Decimal("1")}
     for seed in seed_positions:
         asset = (seed.get("asset") or "").upper().strip()
         price = _static_price_for_asset(asset, seed.get("avg_entry_price"))
@@ -498,7 +588,7 @@ async def compute_daily_nav_history(days: int = 90) -> tuple[list[dict], str]:
         asset = (seed.get("asset") or "").upper().strip()
         quantity = _to_decimal(seed.get("quantity"))
         event_date = (_to_iso(seed.get("first_entry_date") or seed.get("last_trade_date") or seed.get("updated_at")) or today.isoformat())[:10]
-        if not asset or quantity <= ZERO:
+        if not asset or quantity == ZERO:
             continue
         if event_date < range_start_iso:
             initial_holdings[asset] += quantity

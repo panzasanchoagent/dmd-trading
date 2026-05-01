@@ -152,7 +152,7 @@ class PersonalDB:
     async def list_position_seeds(self) -> list:
         """Get seeded starting positions from the local positions table."""
         result = self.client.table("positions").select("*")\
-            .gt("quantity", 0)\
+            .neq("quantity", 0)\
             .order("asset")\
             .execute()
         return result.data or []
@@ -503,38 +503,91 @@ class AreteDB:
     # ============================================
     # MARKET DATA (read-only)
     # ============================================
+
+    async def get_latest_stock_prices(self, assets: list[str]) -> dict:
+        """Get latest stock/ETF closes from Arete stock_ohlcv."""
+        if not assets:
+            return {}
+
+        result = self.client.table("stock_ohlcv").select("symbol, date, close")\
+            .in_("symbol", [asset.upper() for asset in assets])\
+            .order("date", desc=True)\
+            .execute()
+
+        latest_prices: dict[str, dict] = {}
+        for row in result.data or []:
+            symbol = (row.get("symbol") or "").upper()
+            if symbol and symbol not in latest_prices and row.get("close") is not None:
+                latest_prices[symbol] = {
+                    "price": float(row["close"]),
+                    "date": row.get("date"),
+                    "source": "arete_stock_ohlcv",
+                }
+        return latest_prices
+
+    async def get_stock_price_history(self, assets: list[str], days: int = 90) -> list:
+        """Get daily stock/ETF closes from Arete stock_ohlcv."""
+        from datetime import datetime, timedelta
+
+        if not assets:
+            return []
+
+        start_date = (datetime.utcnow() - timedelta(days=days)).date().isoformat()
+        result = self.client.table("stock_ohlcv").select("symbol, date, close")\
+            .in_("symbol", [asset.upper() for asset in assets])\
+            .gte("date", start_date)\
+            .order("date")\
+            .execute()
+        return result.data or []
     
     async def get_current_prices(self, assets: list) -> dict:
-        """Get current prices for assets."""
+        """Get current prices for assets from Arete market data tables."""
         symbols = [a.upper() for a in assets]
-        
+
         result = self.client.table("cmc_asset_data").select("symbol, price, date")\
             .in_("symbol", symbols)\
             .order("date", desc=True)\
             .execute()
-        
-        # Get latest price per symbol
+
         prices = {}
         for row in result.data or []:
             symbol = row["symbol"]
             if symbol not in prices:
                 prices[symbol] = {
                     "price": float(row["price"]),
-                    "date": row["date"]
+                    "date": row["date"],
+                    "source": "arete_cmc_asset_data",
                 }
+
+        missing_symbols = [symbol for symbol in symbols if symbol not in prices]
+        if missing_symbols:
+            prices.update(await self.get_latest_stock_prices(missing_symbols))
+
         return prices
     
     async def get_price_at_date(self, asset: str, date_str: str) -> Optional[float]:
-        """Get price for asset at a specific date."""
+        """Get price for an asset at a specific date from Arete market tables."""
+        symbol = asset.upper()
+
         result = self.client.table("cmc_asset_data").select("price")\
-            .eq("symbol", asset.upper())\
+            .eq("symbol", symbol)\
             .lte("date", date_str)\
             .order("date", desc=True)\
             .limit(1)\
             .execute()
-        
+
         if result.data:
             return float(result.data[0]["price"])
+
+        stock_result = self.client.table("stock_ohlcv").select("close")\
+            .eq("symbol", symbol)\
+            .lte("date", date_str)\
+            .order("date", desc=True)\
+            .limit(1)\
+            .execute()
+
+        if stock_result.data:
+            return float(stock_result.data[0]["close"])
         return None
     
     async def get_price_history(
@@ -542,17 +595,30 @@ class AreteDB:
         asset: str,
         days: int = 30
     ) -> list:
-        """Get price history for an asset."""
+        """Get price history for an asset from Arete market data tables."""
         from datetime import datetime, timedelta
         start_date = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
-        
+
         result = self.client.table("cmc_asset_data").select("date, price")\
             .eq("symbol", asset.upper())\
             .gte("date", start_date)\
             .order("date")\
             .execute()
-        
-        return result.data or []
+
+        if result.data:
+            return result.data or []
+
+        stock_result = self.client.table("stock_ohlcv").select("date, close")\
+            .eq("symbol", asset.upper())\
+            .gte("date", start_date)\
+            .order("date")\
+            .execute()
+
+        return [
+            {"date": row.get("date"), "price": row.get("close")}
+            for row in (stock_result.data or [])
+            if row.get("close") is not None
+        ]
     
     async def get_market_summary(self) -> dict:
         """Get overall market summary (BTC, ETH, total market cap)."""
