@@ -307,9 +307,21 @@ def transform_ibkr(path: Path) -> list[dict[str, Any]]:
     return normalized
 
 
+HYPERLIQUID_DIRECTION_MAP = {
+    "BUY": ("BUY", "open_long"),
+    "SELL": ("SELL", "close_long"),
+    "OPEN LONG": ("BUY", "open_long"),
+    "CLOSE LONG": ("SELL", "close_long"),
+    "OPEN SHORT": ("SELL", "open_short"),
+    "CLOSE SHORT": ("BUY", "close_short"),
+}
+
+
 def hyperliquid_trade_to_normalized(row: dict[str, str]) -> dict[str, Any]:
     asset = clean_symbol((row.get("coin") or "").strip())
-    direction = (row.get("dir") or "").strip().upper()
+    raw_direction = (row.get("dir") or "").strip()
+    direction_key = raw_direction.upper()
+    normalized_direction = HYPERLIQUID_DIRECTION_MAP.get(direction_key)
     price = parse_decimal(row.get("px"))
     size = parse_decimal(row.get("sz"))
     notional = parse_decimal(row.get("ntl"))
@@ -317,29 +329,34 @@ def hyperliquid_trade_to_normalized(row: dict[str, str]) -> dict[str, Any]:
     closed_pnl = parse_decimal(row.get("closedPnl"))
     executed_at_raw = (row.get("time") or "").strip()
 
-    if not asset or direction not in {"BUY", "SELL"}:
-        raise ValueError(f"Invalid Hyperliquid row, expected coin and dir BUY/SELL: {row}")
+    if not asset or normalized_direction is None:
+        raise ValueError(
+            "Invalid Hyperliquid row, expected coin and dir in "
+            f"{sorted(HYPERLIQUID_DIRECTION_MAP)}: {row}"
+        )
     if price is None or size is None or executed_at_raw == "":
         raise ValueError(f"Missing price, size, or time in Hyperliquid row: {row}")
 
+    side, trade_intent = normalized_direction
     quantity = abs(size)
     executed_at = parse_hyperliquid_datetime(executed_at_raw)
 
     notes = [
         "Imported from Hyperliquid fills CSV",
+        f"Hyperliquid direction: {raw_direction}",
         f"Notional: {notional if notional is not None else 'N/A'} USDC",
         f"Fee: {fee if fee is not None else '0'} USDC",
     ]
     if closed_pnl is not None:
         notes.append(f"Closed PnL: {closed_pnl} USDC")
 
-    tags = ["imported", "hyperliquid", "category:crypto-hyperliquid"]
+    tags = ["imported", "hyperliquid", "category:crypto-hyperliquid", f"hyperliquid:{trade_intent}"]
     if closed_pnl is not None:
         tags.append("has_closed_pnl")
 
     return {
         "asset": asset,
-        "side": direction,
+        "side": side,
         "quantity": float(quantize_decimal(quantity)),
         "price": float(quantize_decimal(price)),
         "quote_currency": "USDC",
@@ -352,6 +369,8 @@ def hyperliquid_trade_to_normalized(row: dict[str, str]) -> dict[str, Any]:
             "source_trade": {
                 "coin": row.get("coin"),
                 "dir": row.get("dir"),
+                "normalized_side": side,
+                "trade_intent": trade_intent,
                 "notional": str(notional) if notional is not None else None,
                 "fee": str(fee) if fee is not None else None,
                 "closed_pnl": str(closed_pnl) if closed_pnl is not None else None,

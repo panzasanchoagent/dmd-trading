@@ -50,10 +50,16 @@ class PortfolioFallbackTests(unittest.IsolatedAsyncioTestCase):
             },
         ]
 
+        class FixedDate(portfolio_service.date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 3, 13)
+
         with patch.object(portfolio_service, 'reconstruct_portfolio_state', AsyncMock(return_value=type('R', (), {"positions": [{"asset": "USD"}], "source": "positions_plus_trades"})())), \
              patch.object(portfolio_service.personal_db, 'list_position_seeds', AsyncMock(return_value=seed_positions)), \
              patch.object(portfolio_service.personal_db, 'get_all_trades_for_portfolio', AsyncMock(return_value=trades)), \
-             patch.object(portfolio_service.personal_db, 'get_stock_price_history', AsyncMock(return_value=[])):
+             patch.object(portfolio_service.personal_db, 'get_stock_price_history', AsyncMock(return_value=[])), \
+             patch.object(portfolio_service, 'date', FixedDate):
             history, source = await portfolio_service.compute_daily_nav_history(days=90)
 
         jan_27 = next(point for point in history if point['date'] == '2026-01-27')
