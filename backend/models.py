@@ -48,6 +48,30 @@ class Trade(TradeCreate):
 
 
 # ============================================
+# CASH TRANSACTIONS
+# ============================================
+
+class CashTransactionCreate(BaseModel):
+    """External cash deposit or withdrawal."""
+    asset: str
+    flow_type: str  # DEPOSIT, WITHDRAWAL
+    amount: Decimal
+    executed_at: datetime
+    source_platform: Optional[str] = None
+    reference: Optional[str] = None
+    notes: Optional[str] = None
+    tags: Optional[List[str]] = None
+
+
+class CashTransaction(CashTransactionCreate):
+    """Cash transaction with computed fields."""
+    id: UUID
+    created_at: datetime
+    updated_at: datetime
+    signed_amount: Decimal
+
+
+# ============================================
 # POSITIONS
 # ============================================
 

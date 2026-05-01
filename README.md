@@ -139,13 +139,19 @@ python scripts/trade_ingestion.py hyperliquid /path/to/hyperliquid_fills.csv --o
 # Transform the manual template format
 python scripts/trade_ingestion.py manual scripts/manual_trade_template.csv --output /tmp/manual_trades.json
 
+# Transform external deposits/withdrawals (template: backend/data/deposit_withdrawal_template.csv)
+python scripts/cash_flow_ingestion.py data/deposit_withdrawal_template.csv --output /tmp/cash_flows.json
+
 # Upload normalized trades to the personal Supabase DB
 python scripts/upload_trades.py /tmp/ibkr_trades.json
 python scripts/upload_trades.py /tmp/hyperliquid_trades.json
 python scripts/upload_trades.py /tmp/manual_trades.json
+
+# Upload normalized external cash flows to the personal Supabase DB
+python scripts/cash_flow_ingestion.py /path/to/deposits_withdrawals.csv --upload
 ```
 
-If the personal DB has not yet been migrated, apply `docs/migrations/2026-04-08_add_source_platform_to_trades.sql` and `docs/migrations/2026-05-01_add_trade_category.sql` first. Imported trade categories are now constrained to `TradFi`, `Crypto - Hyperliquid`, and `Crypto - Spot`.
+If the personal DB has not yet been migrated, apply `docs/migrations/2026-04-08_add_source_platform_to_trades.sql`, `docs/migrations/2026-05-01_add_trade_category.sql`, and `docs/migrations/2026-05-01_add_cash_transactions.sql` first. Imported trade categories are now constrained to `TradFi`, `Crypto - Hyperliquid`, and `Crypto - Spot`, while deposits and withdrawals live in `cash_transactions` so they affect cash balances without being treated as trades.
 
 ## Development Status
 

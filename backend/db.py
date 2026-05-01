@@ -144,6 +144,25 @@ class PersonalDB:
             .limit(limit)\
             .execute()
         return result.data or []
+
+    # ============================================
+    # CASH TRANSACTIONS
+    # ============================================
+
+    async def create_cash_transaction(self, cash_transaction_data: dict) -> dict:
+        """Create an external cash deposit/withdrawal record."""
+        result = self.client.table("cash_transactions").insert(cash_transaction_data).execute()
+        if not result.data:
+            raise DatabaseError("Failed to create cash transaction")
+        return result.data[0]
+
+    async def list_cash_transactions(self, limit: int = 5000) -> list:
+        """Get all external cash funding events for portfolio reconstruction."""
+        result = self.client.table("cash_transactions").select("*")\
+            .order("executed_at")\
+            .limit(limit)\
+            .execute()
+        return result.data or []
     
     # ============================================
     # POSITIONS

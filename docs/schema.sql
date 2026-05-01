@@ -57,6 +57,35 @@ CREATE INDEX idx_trades_strategy ON trades(strategy);
 CREATE INDEX idx_trades_source_platform ON trades(source_platform);
 
 -- ============================================
+-- CASH TRANSACTIONS
+-- External deposits/withdrawals that fund the portfolio but are not trades
+-- ============================================
+CREATE TABLE cash_transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+
+    asset VARCHAR(20) NOT NULL,
+    flow_type VARCHAR(20) NOT NULL,
+    amount DECIMAL(20, 8) NOT NULL CHECK (amount > 0),
+    executed_at TIMESTAMPTZ NOT NULL,
+    source_platform VARCHAR(50),
+    reference VARCHAR(100),
+    notes TEXT,
+    tags VARCHAR(50)[],
+
+    signed_amount DECIMAL(20, 8) GENERATED ALWAYS AS (
+        CASE WHEN flow_type = 'WITHDRAWAL' THEN -amount ELSE amount END
+    ) STORED,
+
+    CONSTRAINT cash_transactions_flow_type_allowed_values
+        CHECK (flow_type IN ('DEPOSIT', 'WITHDRAWAL'))
+);
+
+CREATE INDEX idx_cash_transactions_asset ON cash_transactions(asset);
+CREATE INDEX idx_cash_transactions_executed_at ON cash_transactions(executed_at DESC);
+
+-- ============================================
 -- POSITIONS
 -- Computed from trades - current holdings
 -- ============================================
@@ -359,6 +388,7 @@ CREATE TRIGGER update_patterns_updated_at
 -- ============================================
 ALTER TABLE trades ENABLE ROW LEVEL SECURITY;
 ALTER TABLE positions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE cash_transactions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE closed_positions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE journal_entries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE principles ENABLE ROW LEVEL SECURITY;
@@ -371,6 +401,7 @@ ALTER TABLE coach_sessions ENABLE ROW LEVEL SECURITY;
 -- Can tighten later if needed
 CREATE POLICY "Allow all" ON trades FOR ALL USING (true);
 CREATE POLICY "Allow all" ON positions FOR ALL USING (true);
+CREATE POLICY "Allow all" ON cash_transactions FOR ALL USING (true);
 CREATE POLICY "Allow all" ON closed_positions FOR ALL USING (true);
 CREATE POLICY "Allow all" ON journal_entries FOR ALL USING (true);
 CREATE POLICY "Allow all" ON principles FOR ALL USING (true);

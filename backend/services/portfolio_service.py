@@ -426,9 +426,23 @@ async def get_latest_price_map(assets: list[str], trades: Optional[list[dict]] =
     return combined
 
 
+def _cash_transaction_delta(cash_transaction: dict) -> tuple[str, Decimal]:
+    asset = (cash_transaction.get("asset") or "USD").upper().strip() or "USD"
+    signed_amount = cash_transaction.get("signed_amount")
+    if signed_amount is not None:
+        return asset, _to_decimal(signed_amount)
+
+    amount = _to_decimal(cash_transaction.get("amount"))
+    flow_type = (cash_transaction.get("flow_type") or "").upper().strip()
+    if flow_type == "WITHDRAWAL":
+        return asset, -amount
+    return asset, amount
+
+
 async def reconstruct_portfolio_state() -> PortfolioReconstruction:
     seed_positions = await personal_db.list_position_seeds()
     trades = await personal_db.get_all_trades_for_portfolio()
+    cash_transactions = await personal_db.list_cash_transactions()
 
     ledgers: dict[str, AssetLedger] = {}
 
@@ -478,6 +492,20 @@ async def reconstruct_portfolio_state() -> PortfolioReconstruction:
             cash_ledger.position_type = cash_ledger.position_type or "cash"
             cash_ledger.part_of_book = cash_ledger.part_of_book or _infer_part_of_book(cash_currency, trade)
 
+    for cash_transaction in cash_transactions:
+        asset, cash_delta = _cash_transaction_delta(cash_transaction)
+        if not asset or cash_delta == ZERO:
+            continue
+        executed_at = _to_iso(cash_transaction.get("executed_at"))
+        cash_ledger = ledgers.setdefault(asset, AssetLedger(asset=asset))
+        cash_ledger.quantity += cash_delta
+        cash_ledger.total_cost_basis += cash_delta
+        cash_ledger.first_entry_date = cash_ledger.first_entry_date or executed_at
+        cash_ledger.last_trade_date = executed_at or cash_ledger.last_trade_date
+        cash_ledger.number_of_trades += 1
+        cash_ledger.position_type = cash_ledger.position_type or "cash"
+        cash_ledger.part_of_book = cash_ledger.part_of_book or _infer_part_of_book(asset, {"quote_currency": asset, "position_type": "cash"})
+
     positions: list[dict] = []
     closed_positions: list[dict] = []
 
@@ -525,7 +553,7 @@ async def reconstruct_portfolio_state() -> PortfolioReconstruction:
         closed_positions=closed_positions,
         source=source,
         seed_positions_count=len(seed_positions),
-        trades_count=len(trades),
+        trades_count=len(trades) + len(cash_transactions),
     )
 
 
@@ -546,6 +574,7 @@ async def compute_daily_nav_history(days: int = 90) -> tuple[list[dict], str]:
 
     seed_positions = await personal_db.list_position_seeds()
     trades = await personal_db.get_all_trades_for_portfolio()
+    cash_transactions = await personal_db.list_cash_transactions()
     asset_universe = sorted(
         {
             (seed.get("asset") or "").upper().strip()
@@ -554,6 +583,10 @@ async def compute_daily_nav_history(days: int = 90) -> tuple[list[dict], str]:
         | {
             (trade.get("asset") or "").upper().strip()
             for trade in trades
+        }
+        | {
+            (cash_transaction.get("asset") or "").upper().strip()
+            for cash_transaction in cash_transactions
         }
     )
     asset_universe = [asset for asset in asset_universe if asset]
@@ -607,6 +640,12 @@ async def compute_daily_nav_history(days: int = 90) -> tuple[list[dict], str]:
         if asset and price is not None and asset not in fallback_prices:
             fallback_prices[asset] = price
 
+    for cash_transaction in cash_transactions:
+        asset = (cash_transaction.get("asset") or "").upper().strip()
+        price = _static_price_for_asset(asset, 1)
+        if asset and price is not None and asset not in fallback_prices:
+            fallback_prices[asset] = price
+
     quantity_events: dict[str, list[tuple[str, Decimal]]] = defaultdict(list)
     initial_holdings: dict[str, Decimal] = defaultdict(lambda: ZERO)
     range_start_iso = start_date.isoformat()
@@ -641,6 +680,16 @@ async def compute_daily_nav_history(days: int = 90) -> tuple[list[dict], str]:
                 initial_holdings[cash_currency] += cash_delta
             else:
                 quantity_events[event_date].append((cash_currency, cash_delta))
+
+    for cash_transaction in cash_transactions:
+        asset, cash_delta = _cash_transaction_delta(cash_transaction)
+        event_date = (_to_iso(cash_transaction.get("executed_at")) or today.isoformat())[:10]
+        if not asset or cash_delta == ZERO:
+            continue
+        if event_date < range_start_iso:
+            initial_holdings[asset] += cash_delta
+        else:
+            quantity_events[event_date].append((asset, cash_delta))
 
     history: list[dict] = []
     latest_seen: dict[str, Decimal] = {}

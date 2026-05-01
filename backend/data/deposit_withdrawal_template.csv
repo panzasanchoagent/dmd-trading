@@ -1,0 +1,3 @@
+executed_at,flow_type,asset,amount,source_platform,reference,notes,tags
+2026-05-01T09:00:00Z,DEPOSIT,USD,10000,bank_wire,initial_funding,Initial portfolio funding,"funding,external_cash_flow"
+2026-05-03T14:30:00Z,WITHDRAWAL,USDC,2500,hyperliquid,profit_sweep,Swept profits back to bank,"profit_sweep,external_cash_flow"

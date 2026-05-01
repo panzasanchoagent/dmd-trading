@@ -71,7 +71,8 @@ class PortfolioFallbackTests(unittest.IsolatedAsyncioTestCase):
         ]
 
         with patch.object(portfolio_service.personal_db, 'list_position_seeds', AsyncMock(return_value=[])), \
-             patch.object(portfolio_service.personal_db, 'get_all_trades_for_portfolio', AsyncMock(return_value=trades)):
+             patch.object(portfolio_service.personal_db, 'get_all_trades_for_portfolio', AsyncMock(return_value=trades)), \
+             patch.object(portfolio_service.personal_db, 'list_cash_transactions', AsyncMock(return_value=[])):
             reconstruction = await portfolio_service.reconstruct_portfolio_state()
 
         positions = {position['asset']: position for position in reconstruction.positions}
@@ -108,7 +109,8 @@ class PortfolioFallbackTests(unittest.IsolatedAsyncioTestCase):
         ]
 
         with patch.object(portfolio_service.personal_db, 'list_position_seeds', AsyncMock(return_value=[])), \
-             patch.object(portfolio_service.personal_db, 'get_all_trades_for_portfolio', AsyncMock(return_value=trades)):
+             patch.object(portfolio_service.personal_db, 'get_all_trades_for_portfolio', AsyncMock(return_value=trades)), \
+             patch.object(portfolio_service.personal_db, 'list_cash_transactions', AsyncMock(return_value=[])):
             reconstruction = await portfolio_service.reconstruct_portfolio_state()
 
         positions = {position['asset']: position for position in reconstruction.positions}
@@ -140,6 +142,7 @@ class PortfolioFallbackTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(portfolio_service, 'reconstruct_portfolio_state', AsyncMock(return_value=reconstruction)), \
              patch.object(portfolio_service.personal_db, 'list_position_seeds', AsyncMock(return_value=[])), \
              patch.object(portfolio_service.personal_db, 'get_all_trades_for_portfolio', AsyncMock(return_value=trades)), \
+             patch.object(portfolio_service.personal_db, 'list_cash_transactions', AsyncMock(return_value=[])), \
              patch.object(portfolio_service.arete_db, 'get_stock_price_history', AsyncMock(return_value=[])), \
              patch.object(portfolio_service.arete_db, 'get_price_history', AsyncMock(return_value=[
                  {"date": '2026-03-11', "price": 1000.0},
@@ -185,6 +188,7 @@ class PortfolioFallbackTests(unittest.IsolatedAsyncioTestCase):
                  "last_trade_date": "2026-03-10T00:00:00+00:00",
              }])), \
              patch.object(portfolio_service.personal_db, 'get_all_trades_for_portfolio', AsyncMock(return_value=trades)), \
+             patch.object(portfolio_service.personal_db, 'list_cash_transactions', AsyncMock(return_value=[])), \
              patch.object(portfolio_service.arete_db, 'get_stock_price_history', AsyncMock(return_value=[])), \
              patch.object(portfolio_service.arete_db, 'get_price_history', AsyncMock(return_value=[
                  {"date": '2026-03-11', "price": 20.0},
@@ -197,6 +201,32 @@ class PortfolioFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(history[0]['nav'], 1000.0, places=4)
         self.assertAlmostEqual(history[1]['nav'], 1050.0, places=4)
         self.assertAlmostEqual(history[2]['nav'], 1100.0, places=4)
+
+    async def test_external_cash_flows_affect_cash_ledger_without_creating_trades(self):
+        cash_transactions = [
+            {
+                "asset": "USD",
+                "flow_type": "DEPOSIT",
+                "amount": 1000.0,
+                "executed_at": "2026-03-10T00:00:00+00:00",
+            },
+            {
+                "asset": "USD",
+                "flow_type": "WITHDRAWAL",
+                "amount": 250.0,
+                "executed_at": "2026-03-11T00:00:00+00:00",
+            },
+        ]
+
+        with patch.object(portfolio_service.personal_db, 'list_position_seeds', AsyncMock(return_value=[])), \
+             patch.object(portfolio_service.personal_db, 'get_all_trades_for_portfolio', AsyncMock(return_value=[])), \
+             patch.object(portfolio_service.personal_db, 'list_cash_transactions', AsyncMock(return_value=cash_transactions)):
+            reconstruction = await portfolio_service.reconstruct_portfolio_state()
+
+        positions = {position['asset']: position for position in reconstruction.positions}
+        self.assertEqual(positions['USD']['quantity'], 750.0)
+        self.assertEqual(positions['USD']['position_type'], 'cash')
+        self.assertEqual(reconstruction.closed_positions, [])
 
 
 if __name__ == '__main__':
