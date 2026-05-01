@@ -25,6 +25,7 @@ interface Position {
   unrealized_pnl_pct: number | null;
   allocation_pct: number | null;
   position_type: string | null;
+  part_of_book?: string | null;
   first_entry_date?: string | null;
   last_trade_date?: string | null;
   number_of_trades?: number;
@@ -40,6 +41,7 @@ interface ClosedPosition {
   holding_period_days: number | null;
   number_of_trades: number;
   win_loss: string | null;
+  part_of_book?: string | null;
 }
 
 interface NavPoint {
@@ -141,6 +143,8 @@ export default function PortfolioPage() {
   const [totalValue, setTotalValue] = useState(0);
   const [source, setSource] = useState<string | null>(null);
   const [closedPositions, setClosedPositions] = useState<ClosedPosition[]>([]);
+  const [closedAssetFilter, setClosedAssetFilter] = useState<string>('all');
+  const [closedBookFilter, setClosedBookFilter] = useState<string>('all');
   const [navHistory, setNavHistory] = useState<NavPoint[]>([]);
   const [navGap, setNavGap] = useState<string | null>(null);
   const [navDays, setNavDays] = useState<number | null>(null);
@@ -201,6 +205,25 @@ export default function PortfolioPage() {
   const topPnL = useMemo(
     () => [...positions].filter((position) => position.asset !== 'USD').sort((a, b) => (b.unrealized_pnl || 0) - (a.unrealized_pnl || 0)),
     [positions]
+  );
+
+  const closedAssetOptions = useMemo(
+    () => ['all', ...Array.from(new Set(closedPositions.map((position) => position.asset).filter(Boolean))).sort()],
+    [closedPositions]
+  );
+
+  const closedBookOptions = useMemo(
+    () => ['all', ...Array.from(new Set(closedPositions.map((position) => position.part_of_book || 'unclassified'))).sort()],
+    [closedPositions]
+  );
+
+  const filteredClosedPositions = useMemo(
+    () => closedPositions.filter((position) => {
+      const assetMatch = closedAssetFilter === 'all' || position.asset === closedAssetFilter;
+      const bookMatch = closedBookFilter === 'all' || (position.part_of_book || 'unclassified') === closedBookFilter;
+      return assetMatch && bookMatch;
+    }),
+    [closedAssetFilter, closedBookFilter, closedPositions]
   );
 
   const latestNav = navHistory.length ? navHistory[navHistory.length - 1]?.nav || 0 : totalValue;
@@ -393,16 +416,37 @@ export default function PortfolioPage() {
       </div>
 
       <div className="rounded-lg border bg-white overflow-hidden">
-        <div className="border-b px-4 py-3">
+        <div className="border-b px-4 py-3 space-y-3 md:space-y-0 md:flex md:items-center md:justify-between">
           <h2 className="text-lg font-semibold text-gray-900">Recent closed positions</h2>
+          <div className="flex flex-col gap-2 md:flex-row">
+            <select
+              value={closedAssetFilter}
+              onChange={(event) => setClosedAssetFilter(event.target.value)}
+              className="rounded-md border border-gray-300 px-3 py-2 text-sm"
+            >
+              {closedAssetOptions.map((asset) => (
+                <option key={asset} value={asset}>{asset === 'all' ? 'All assets' : asset}</option>
+              ))}
+            </select>
+            <select
+              value={closedBookFilter}
+              onChange={(event) => setClosedBookFilter(event.target.value)}
+              className="rounded-md border border-gray-300 px-3 py-2 text-sm"
+            >
+              {closedBookOptions.map((book) => (
+                <option key={book} value={book}>{book === 'all' ? 'All books' : book}</option>
+              ))}
+            </select>
+          </div>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[800px]">
+          <table className="w-full min-w-[920px]">
             <thead className="bg-gray-50 border-b">
               <tr>
                 <th className="px-4 py-3 text-left text-sm font-medium text-gray-500">Asset</th>
                 <th className="px-4 py-3 text-left text-sm font-medium text-gray-500">Entry</th>
                 <th className="px-4 py-3 text-left text-sm font-medium text-gray-500">Exit</th>
+                <th className="px-4 py-3 text-left text-sm font-medium text-gray-500">Book</th>
                 <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">Trades</th>
                 <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">Holding Days</th>
                 <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">Realized P&L</th>
@@ -410,16 +454,17 @@ export default function PortfolioPage() {
               </tr>
             </thead>
             <tbody className="divide-y">
-              {closedPositions.length === 0 ? (
+              {filteredClosedPositions.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-gray-500">No closed positions yet.</td>
+                  <td colSpan={8} className="px-4 py-8 text-center text-gray-500">No closed positions match the current filters.</td>
                 </tr>
               ) : (
-                closedPositions.map((position, index) => (
+                filteredClosedPositions.map((position, index) => (
                   <tr key={`${position.asset}-${position.exit_date || index}`} className="hover:bg-gray-50">
                     <td className="px-4 py-3 font-medium">{position.asset}</td>
                     <td className="px-4 py-3 text-sm text-gray-600">{formatDate(position.entry_date)}</td>
                     <td className="px-4 py-3 text-sm text-gray-600">{formatDate(position.exit_date)}</td>
+                    <td className="px-4 py-3 text-sm text-gray-600 capitalize">{position.part_of_book || 'unclassified'}</td>
                     <td className="px-4 py-3 text-right">{position.number_of_trades}</td>
                     <td className="px-4 py-3 text-right">{position.holding_period_days ?? '—'}</td>
                     <td className={`px-4 py-3 text-right ${(position.realized_pnl || 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>{formatCurrency(position.realized_pnl)}</td>

@@ -52,6 +52,7 @@ class ClosedCycle:
     number_of_trades: int = 0
     strategy: Optional[str] = None
     win_loss: Optional[str] = None
+    part_of_book: Optional[str] = None
 
 
 @dataclass
@@ -64,6 +65,7 @@ class AssetLedger:
     number_of_trades: int = 0
     position_type: Optional[str] = None
     target_allocation_pct: Optional[Decimal] = None
+    part_of_book: Optional[str] = None
     active_cycle: ClosedCycle | None = None
     closed_cycles: list[ClosedCycle] = field(default_factory=list)
 
@@ -115,6 +117,25 @@ def _infer_position_type(record: dict) -> str | None:
     return explicit_type or POSITION_TYPE_BY_TIMEFRAME.get(timeframe) or "unclassified"
 
 
+def _infer_part_of_book(asset: str, record: dict) -> str:
+    explicit = (record.get("part_of_book") or "").strip().lower()
+    if explicit:
+        return explicit
+
+    normalized_asset = (asset or "").upper().strip()
+    quote_currency = (record.get("quote_currency") or "").upper().strip()
+    category = (record.get("category") or "").strip().lower()
+    source_platform = (record.get("source_platform") or "").strip().lower()
+    position_type = (record.get("position_type") or "").strip().lower()
+    tags = [str(tag).strip().lower() for tag in (record.get("tags") or []) if tag]
+
+    if normalized_asset == "USDC" or quote_currency == "USDC" or "crypto" in category or source_platform == "hyperliquid" or position_type == "crypto":
+        return "crypto"
+    if normalized_asset == "USD" or quote_currency == "USD" or source_platform == "ibkr" or any(tag.startswith("asset_category:stocks") for tag in tags):
+        return "tradfi"
+    return "unclassified"
+
+
 def _cycle_direction_for_ledger(ledger: AssetLedger) -> str | None:
     if ledger.quantity > ZERO:
         return "long"
@@ -125,7 +146,9 @@ def _cycle_direction_for_ledger(ledger: AssetLedger) -> str | None:
 
 def _ensure_cycle(ledger: AssetLedger, direction: str) -> ClosedCycle:
     if ledger.active_cycle is None or ledger.active_cycle.direction != direction:
-        ledger.active_cycle = ClosedCycle(asset=ledger.asset, direction=direction)
+        ledger.active_cycle = ClosedCycle(asset=ledger.asset, direction=direction, part_of_book=ledger.part_of_book)
+    elif ledger.active_cycle.part_of_book is None:
+        ledger.active_cycle.part_of_book = ledger.part_of_book
     return ledger.active_cycle
 
 
@@ -134,6 +157,7 @@ def _touch_ledger(ledger: AssetLedger, executed_at: Optional[str], record: dict)
     ledger.last_trade_date = executed_at or ledger.last_trade_date
     ledger.number_of_trades += 1
     ledger.position_type = ledger.position_type or _infer_position_type(record)
+    ledger.part_of_book = ledger.part_of_book or _infer_part_of_book(ledger.asset, record)
     if record.get("target_allocation_pct") is not None:
         ledger.target_allocation_pct = _to_decimal(record.get("target_allocation_pct"))
 
@@ -293,13 +317,14 @@ def _serialize_closed_cycle(cycle: ClosedCycle) -> dict:
         "number_of_trades": cycle.number_of_trades,
         "strategy": cycle.strategy,
         "win_loss": cycle.win_loss,
+        "part_of_book": cycle.part_of_book,
         "source": "reconstructed_from_positions_and_trades",
     }
 
 
 def _static_price_for_asset(asset: str, fallback_price: Any = None) -> Optional[Decimal]:
     symbol = (asset or "").upper().strip()
-    if symbol == "USD":
+    if symbol in {"USD", "USDC"}:
         return Decimal("1")
 
     price = _to_decimal(fallback_price)
@@ -350,19 +375,18 @@ def apply_price_fallbacks(positions: list[dict], live_prices: Optional[dict[str,
     return positions, total_value
 
 
-def _trade_cash_delta(trade: dict) -> Decimal:
-    quote_currency = (trade.get("quote_currency") or "USD").upper().strip()
-    if quote_currency != "USD":
-        return ZERO
+def _trade_cash_delta(trade: dict) -> tuple[str, Decimal]:
+    quote_currency = (trade.get("quote_currency") or "USD").upper().strip() or "USD"
 
     if trade.get("cash_flow") is not None:
-        return _to_decimal(trade.get("cash_flow"))
+        return quote_currency, _to_decimal(trade.get("cash_flow"))
 
     side = (trade.get("side") or "").upper().strip()
     quantity = _to_decimal(trade.get("quantity"))
     price = _to_decimal(trade.get("price"))
     gross = quantity * price
-    return -gross if side == "BUY" else gross if side == "SELL" else ZERO
+    cash_delta = -gross if side == "BUY" else gross if side == "SELL" else ZERO
+    return quote_currency, cash_delta
 
 
 async def get_latest_price_map(assets: list[str], trades: Optional[list[dict]] = None) -> dict[str, dict[str, Any]]:
@@ -398,6 +422,7 @@ async def get_latest_price_map(assets: list[str], trades: Optional[list[dict]] =
         combined.setdefault(asset, payload)
 
     combined.setdefault("USD", {"price": 1.0, "source": "usd_parity", "date": None})
+    combined.setdefault("USDC", {"price": 1.0, "source": "usdc_parity", "date": None})
     return combined
 
 
@@ -442,15 +467,16 @@ async def reconstruct_portfolio_state() -> PortfolioReconstruction:
         else:
             _apply_sell(ledger, quantity, price, executed_at, trade)
 
-        cash_delta = _trade_cash_delta(trade)
+        cash_currency, cash_delta = _trade_cash_delta(trade)
         if cash_delta:
-            cash_ledger = ledgers.setdefault("USD", AssetLedger(asset="USD"))
+            cash_ledger = ledgers.setdefault(cash_currency, AssetLedger(asset=cash_currency))
             cash_ledger.quantity += cash_delta
             cash_ledger.total_cost_basis += cash_delta
             cash_ledger.first_entry_date = cash_ledger.first_entry_date or executed_at
             cash_ledger.last_trade_date = executed_at or cash_ledger.last_trade_date
             cash_ledger.number_of_trades += 1
             cash_ledger.position_type = cash_ledger.position_type or "cash"
+            cash_ledger.part_of_book = cash_ledger.part_of_book or _infer_part_of_book(cash_currency, trade)
 
     positions: list[dict] = []
     closed_positions: list[dict] = []
@@ -480,6 +506,7 @@ async def reconstruct_portfolio_state() -> PortfolioReconstruction:
                 "allocation_pct": None,
                 "position_type": ledger.position_type or "unclassified",
                 "target_allocation_pct": _to_float(ledger.target_allocation_pct),
+                "part_of_book": ledger.part_of_book or "unclassified",
                 "source": "reconstructed_from_positions_and_trades",
             }
         )
@@ -531,7 +558,7 @@ async def compute_daily_nav_history(days: int = 90) -> tuple[list[dict], str]:
     )
     asset_universe = [asset for asset in asset_universe if asset]
 
-    assets = [asset for asset in asset_universe if asset != "USD"]
+    assets = [asset for asset in asset_universe if asset not in {"USD", "USDC"}]
     stock_history = await arete_db.get_stock_price_history(assets=assets, days=days)
     stock_symbols = {(row.get("symbol") or "").upper() for row in stock_history}
     crypto_symbols = [asset for asset in assets if asset not in stock_symbols]
@@ -567,7 +594,7 @@ async def compute_daily_nav_history(days: int = 90) -> tuple[list[dict], str]:
         if symbol and row_date and close is not None:
             by_symbol[symbol][row_date] = _to_decimal(close)
 
-    fallback_prices: dict[str, Decimal] = {"USD": Decimal("1")}
+    fallback_prices: dict[str, Decimal] = {"USD": Decimal("1"), "USDC": Decimal("1")}
     for seed in seed_positions:
         asset = (seed.get("asset") or "").upper().strip()
         price = _static_price_for_asset(asset, seed.get("avg_entry_price"))
@@ -608,12 +635,12 @@ async def compute_daily_nav_history(days: int = 90) -> tuple[list[dict], str]:
         else:
             quantity_events[event_date].append((asset, signed_quantity))
 
-        cash_delta = _trade_cash_delta(trade)
+        cash_currency, cash_delta = _trade_cash_delta(trade)
         if cash_delta:
             if event_date < range_start_iso:
-                initial_holdings["USD"] += cash_delta
+                initial_holdings[cash_currency] += cash_delta
             else:
-                quantity_events[event_date].append(("USD", cash_delta))
+                quantity_events[event_date].append((cash_currency, cash_delta))
 
     history: list[dict] = []
     latest_seen: dict[str, Decimal] = {}

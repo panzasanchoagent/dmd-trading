@@ -96,6 +96,8 @@ async def get_positions(include_prices: bool = Query(True)):
 async def get_closed_positions(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
+    asset: Optional[str] = Query(None),
+    part_of_book: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200)
 ):
     """Get closed position history with P&L."""
@@ -105,6 +107,10 @@ async def get_closed_positions(
             closed = [position for position in closed if (position.get("exit_date") or "") >= start_date]
         if end_date:
             closed = [position for position in closed if (position.get("exit_date") or "") <= end_date]
+        if asset:
+            closed = [position for position in closed if (position.get("asset") or "").upper() == asset.upper()]
+        if part_of_book:
+            closed = [position for position in closed if (position.get("part_of_book") or "").lower() == part_of_book.lower()]
         closed = closed[:limit]
         
         # Calculate summary stats
@@ -120,6 +126,10 @@ async def get_closed_positions(
             "losses": losses,
             "win_rate": (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0,
             "source": source,
+            "filters": {
+                "asset": asset.upper() if asset else None,
+                "part_of_book": part_of_book.lower() if part_of_book else None,
+            },
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
